@@ -8,6 +8,14 @@ struct MessageBubble: View {
     @State private var dotOpacity: [Double] = [1.0, 0.6, 0.6]
     @State private var hoveredStatIndex: Int? = nil
     var body: some View {
+        if message.role == "system" {
+            HStack(spacing: 8) {
+                Rectangle().frame(height: 0.5).foregroundColor(.secondary.opacity(0.3))
+                Text(message.content).font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1).fixedSize()
+                Rectangle().frame(height: 0.5).foregroundColor(.secondary.opacity(0.3))
+            }
+            .padding(.horizontal, 24).padding(.vertical, 4)
+        } else {
         HStack(alignment: .bottom, spacing: 10) {
             if !isUser { Image(systemName: "waveform.circle.fill").font(.system(size: 32)).foregroundStyle(Color.green.gradient).padding(.bottom, 2) } else { Spacer() }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
@@ -19,7 +27,7 @@ struct MessageBubble: View {
                                 Circle().fill(Color.blue).frame(width: 6, height: 6)
                                     .opacity(dotOpacity[index])
                             }
-                        }.padding(.horizontal, 14).padding(.vertical, 10).onAppear { 
+                        }.padding(.horizontal, 14).padding(.vertical, 10).onAppear {
                             withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { dotOpacity[0] = 0.3 }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                                 withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { dotOpacity[1] = 0.3 }
@@ -30,6 +38,30 @@ struct MessageBubble: View {
                         }
                     } else {
                         Text(message.content).padding(.horizontal, 14).padding(.vertical, 10).background(isUser ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(Color.gray.opacity(0.15).gradient)).foregroundColor(isUser ? .white : .primary).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)).textSelection(.enabled)
+                    }
+                    if let sources = message.searchSources, !sources.isEmpty, !isUser {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "globe.asia.australia").font(.system(size: 7))
+                                Text("Web検索 \(sources.count)件").font(.system(size: 8, weight: .bold))
+                            }
+                            .foregroundColor(.secondary)
+                            ForEach(sources) { source in
+                                Link(destination: URL(string: source.url) ?? URL(string: "https://example.com")!) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "link").font(.system(size: 7)).foregroundColor(.blue)
+                                        Text(source.title).font(.system(size: 8)).lineLimit(1).foregroundColor(.primary)
+                                        Spacer(minLength: 0)
+                                        Text(URL(string: source.url)?.host ?? "").font(.system(size: 7, design: .monospaced)).foregroundColor(.secondary).lineLimit(1)
+                                    }
+                                    .padding(.horizontal, 8).padding(.vertical, 3)
+                                    .background(Color.blue.opacity(0.06))
+                                    .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.leading, 4)
                     }
                     if let stats = message.stats, !isUser, !message.content.isEmpty {
                         HStack(spacing: 3) {
@@ -121,6 +153,7 @@ struct MessageBubble: View {
             }
             if isUser { Image(systemName: "person.crop.circle.fill").font(.system(size: 32)).foregroundStyle(Color.blue.gradient).padding(.bottom, 2) } else { Spacer() }
         }.padding(.horizontal, 16).padding(.vertical, 8)
+        } // end else (non-system message)
     }
 }
 
@@ -139,7 +172,48 @@ struct AetheriumView: View {
                             Text("Aetherium").font(.system(size: 40, weight: .black, design: .rounded))
                         }
                         VStack(alignment: .leading, spacing: 25) {
-                            settingRow(title: "Model", icon: "cpu", content: $vm.selectedModel, options: vm.models, placeholder: "LLMを起動してください")
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label("AI Provider", systemImage: "cpu.fill").font(.subheadline).bold()
+                                Picker("", selection: $vm.aiProvider) {
+                                    ForEach(AIProvider.allCases, id: \.self) { provider in
+                                        Text(provider.rawValue).tag(provider)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .labelsHidden()
+                                .onChange(of: vm.aiProvider) { _, newValue in
+                                    if newValue == .appleIntelligence {
+                                        vm.setupFoundationSession()
+                                    }
+                                }
+                            }
+                            if vm.aiProvider == .ollama {
+                                settingRow(title: "Model", icon: "cpu", content: $vm.selectedModel, options: vm.models, placeholder: "LLMを起動してください")
+                            } else {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("Apple Intelligence", systemImage: "apple.intelligence").font(.subheadline).bold()
+                                    if let error = vm.appleIntelligenceError {
+                                        Text(error).font(.caption).foregroundColor(.red).fixedSize(horizontal: false, vertical: true)
+                                    } else {
+                                        Text("オンデバイス AI が利用可能です").font(.caption).foregroundColor(.green)
+                                    }
+                                    Toggle(isOn: $vm.webSearchEnabled) {
+                                        Label("Web検索 (SearXNG)", systemImage: "magnifyingglass")
+                                            .font(.caption)
+                                    }
+                                    .toggleStyle(.switch)
+                                    .disabled(vm.appleIntelligenceError != nil)
+                                    .onChange(of: vm.webSearchEnabled) { _, _ in
+                                        vm.setupFoundationSession()
+                                    }
+                                    if vm.webSearchEnabled {
+                                        TextField("SearXNG URL", text: $vm.searxngURL)
+                                            .textFieldStyle(.roundedBorder)
+                                            .font(.caption)
+                                            .onSubmit { vm.setupFoundationSession() }
+                                    }
+                                }
+                            }
                             settingRow(title: "Voice", icon: "mouth", selection: $vm.selectedSpeakerID, options: vm.displaySpeakers, placeholder: "VOICEVOXを起動してください")
                             VStack(alignment: .leading, spacing: 8) {
                                 Label("Speed: \(String(format: "%.2f", vm.speechSpeed))x", systemImage: "speedometer").font(.subheadline).bold()
@@ -154,9 +228,9 @@ struct AetheriumView: View {
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
                             .clipShape(Capsule())
-                            .disabled(vm.models.isEmpty || vm.displaySpeakers.isEmpty)
+                            .disabled(!vm.canStartSession)
 
-                            if vm.models.isEmpty || vm.displaySpeakers.isEmpty {
+                            if (vm.aiProvider == .ollama && vm.models.isEmpty) || vm.displaySpeakers.isEmpty {
                                 Button(action: { Task { await vm.fetchAll() } }) {
                                     Label(vm.isFetching ? "接続中..." : "再接続", systemImage: "arrow.clockwise")
                                 }
@@ -211,7 +285,37 @@ struct AetheriumView: View {
                                     Text(vm.isGenerating ? "Generating..." : (vm.isAudioPlaying ? "Playing..." : "Ready")).font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor((vm.isGenerating || vm.isAudioPlaying) ? .primary : .secondary)
                                 }
                                 .padding(.leading, 8).padding(.trailing, vm.isGenerating ? 8 : 4).padding(.vertical, 4)
+                                if vm.aiProvider == .appleIntelligence {
+                                    HStack(spacing: 4) {
+                                        ZStack(alignment: .leading) {
+                                            Capsule()
+                                                .fill(Color.secondary.opacity(0.15))
+                                                .frame(width: 56, height: 4)
+                                            Capsule()
+                                                .fill(contextIndicatorColor(vm.contextUsageRatio).gradient)
+                                                .frame(width: max(0, 56 * vm.contextUsageRatio), height: 4)
+                                                .animation(.easeInOut(duration: 0.4), value: vm.contextUsageRatio)
+                                        }
+                                        Text("\(Int(vm.contextUsageRatio * 100))%")
+                                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                            .foregroundColor(contextIndicatorColor(vm.contextUsageRatio))
+                                            .lineLimit(1)
+                                            .fixedSize()
+                                            .animation(.easeInOut(duration: 0.4), value: vm.contextUsageRatio)
+                                    }
+                                    .help("推定コンテキスト使用量: \(Int(vm.contextUsageRatio * 100))%（約4096トークン想定）")
+                                }
                                 Divider().frame(height: 16).padding(.horizontal, 2)
+                                if vm.aiProvider == .appleIntelligence {
+                                    Button(action: { vm.clearContext() }) {
+                                        Image(systemName: "arrow.counterclockwise")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .disabled(vm.isGenerating)
+                                    .help("コンテキストをクリア（会話履歴はそのまま残ります）")
+                                    Divider().frame(height: 16).padding(.horizontal, 2)
+                                }
                                 Button(action: { withAnimation { inputText = ""; vm.resetSession() } }) { Text("Exit").fontWeight(.medium).foregroundColor(.red) }.buttonStyle(.bordered).controlSize(.small)
                                 Spacer().frame(width: 6)
                             }
@@ -220,7 +324,7 @@ struct AetheriumView: View {
                 }
             }
             .navigationTitle("Aetherium")
-            .navigationSubtitle(vm.isInSession ? "Session with \(vm.currentSpeakerName) (\(vm.selectedModel))" : "Settings")
+            .navigationSubtitle(vm.isInSession ? "Session with \(vm.currentSpeakerName) (\(vm.activeModelLabel))" : "Settings")
         }
         .frame(minWidth: 600, minHeight: 700)
     }
@@ -232,6 +336,12 @@ struct AetheriumView: View {
                 Picker("", selection: content) { ForEach(options, id: \.self) { Text($0).tag($0) } }.pickerStyle(.menu).labelsHidden()
             }
         }
+    }
+
+    private func contextIndicatorColor(_ ratio: Double) -> Color {
+        if ratio < 0.6 { return .blue }
+        if ratio < 0.8 { return .orange }
+        return .red
     }
 
     private func settingRow(title: String, icon: String, selection: Binding<Int>, options: [(id: Int, name: String)], placeholder: String) -> some View {

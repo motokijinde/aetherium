@@ -1,5 +1,10 @@
 import Foundation
 
+enum AIProvider: String, CaseIterable {
+    case ollama = "Ollama"
+    case appleIntelligence = "Apple Intelligence"
+}
+
 struct UsageStats: Codable {
     let prompt_tokens: Int
     let completion_tokens: Int
@@ -8,11 +13,18 @@ struct UsageStats: Codable {
     var ttft: Double? // Time To First Token
 }
 
+struct SearchSource: Codable, Identifiable {
+    var id = UUID()
+    let title: String
+    let url: String
+}
+
 struct Message: Identifiable, Codable {
     var id = UUID()
     let role: String
     var content: String
     var stats: UsageStats?
+    var searchSources: [SearchSource]?
 }
 
 struct VVStyle: Codable, Hashable {
