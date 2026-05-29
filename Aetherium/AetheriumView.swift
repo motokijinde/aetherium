@@ -91,10 +91,10 @@ struct MessageBubble: View {
                                         .zIndex(1)
                                 }
                             }
-                            
+
                             HStack(spacing: 2) {
                                 Image(systemName: "tag").font(.system(size: 7))
-                                Text(String(format: "%d tokens", stats.completion_tokens)).font(.system(size: 8, design: .monospaced))
+                                Text(String(format: "%d tokens", stats.completionTokens)).font(.system(size: 8, design: .monospaced))
                             }
                             .padding(.horizontal, 6)
                             .padding(.vertical, 4)
@@ -118,7 +118,7 @@ struct MessageBubble: View {
                                         .zIndex(1)
                                 }
                             }
-                            
+
                             HStack(spacing: 2) {
                                 Image(systemName: "clock").font(.system(size: 7))
                                 Text(String(format: "%.1f second", stats.ttft ?? 0)).font(.system(size: 8, design: .monospaced))
@@ -184,11 +184,45 @@ struct AetheriumView: View {
                                 .onChange(of: vm.aiProvider) { _, newValue in
                                     if newValue == .appleIntelligence {
                                         vm.setupFoundationSession()
+                                    } else if !vm.selectedModel.isEmpty {
+                                        Task { await vm.fetchModelInfo(for: vm.selectedModel) }
                                     }
                                 }
                             }
                             if vm.aiProvider == .ollama {
                                 settingRow(title: "Model", icon: "cpu", content: $vm.selectedModel, options: vm.models, placeholder: "LLMを起動してください")
+                                    .onChange(of: vm.selectedModel) { _, newModel in
+                                        guard !newModel.isEmpty else { return }
+                                        Task { await vm.fetchModelInfo(for: newModel) }
+                                    }
+                                VStack(alignment: .leading, spacing: 8) {
+                                    let sizes = ChatViewModel.ollamaContextSizeOptions
+                                    Label("Context Size: \(contextSizeLabel(vm.ollamaContextSize))", systemImage: "memorychip").font(.subheadline).bold()
+                                    Slider(
+                                        value: Binding(
+                                            get: { Double(sizes.firstIndex(of: vm.ollamaContextSize) ?? 0) },
+                                            set: { vm.ollamaContextSize = sizes[Int($0.rounded())] }
+                                        ),
+                                        in: 0...Double(sizes.count - 1),
+                                        step: 1
+                                    )
+                                }
+                                VStack(alignment: .leading, spacing: 8) {
+                                    if vm.ollamaToolsSupported {
+                                        Toggle(isOn: $vm.webSearchEnabled) {
+                                            Label("Web検索 (SearXNG)", systemImage: "magnifyingglass").font(.subheadline).bold()
+                                        }
+                                        .toggleStyle(.switch)
+                                        if vm.webSearchEnabled {
+                                            TextField("SearXNG URL", text: $vm.searxngURL)
+                                                .textFieldStyle(.roundedBorder)
+                                                .font(.caption)
+                                        }
+                                    } else if !vm.models.isEmpty {
+                                        Label("Web検索 (SearXNG)", systemImage: "magnifyingglass").font(.subheadline).bold()
+                                        Text("このモデルはツール呼び出し非対応").font(.caption).foregroundColor(.secondary)
+                                    }
+                                }
                             } else {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Label("Apple Intelligence", systemImage: "apple.intelligence").font(.subheadline).bold()
@@ -220,7 +254,7 @@ struct AetheriumView: View {
                                 Slider(value: $vm.speechSpeed, in: 0.5...2.0)
                             }
                         }.padding(30).background(.thinMaterial).cornerRadius(24).frame(width: 380)
-                        
+
                         VStack(spacing: 12) {
                             Button(action: { withAnimation(.spring()) { vm.isInSession = true } }) {
                                 Text("Start Session").font(.headline).frame(width: 220, height: 40)
@@ -255,7 +289,13 @@ struct AetheriumView: View {
                             }
                         }
                         HStack(spacing: 12) {
-                            TextField("メッセージを入力...", text: $inputText).textFieldStyle(.plain).padding(.horizontal, 16).padding(.vertical, 10).background(Capsule().fill(Color.primary.opacity(0.05))).onSubmit { if !vm.isGenerating { let t = inputText; inputText = ""; vm.sendMessage(t) } }
+                            TextField("メッセージを入力...", text: $inputText).textFieldStyle(.plain).padding(.horizontal, 16).padding(.vertical, 10).background(Capsule().fill(Color.primary.opacity(0.05))).onSubmit {
+                                let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !vm.isGenerating && !t.isEmpty {
+                                    inputText = ""
+                                    vm.sendMessage(t)
+                                }
+                            }
                             if vm.isGenerating || vm.isAudioPlaying {
                                 Button(action: { vm.stopGeneration() }) {
                                     Image(systemName: "stop.circle.fill")
@@ -264,13 +304,19 @@ struct AetheriumView: View {
                                 }
                                 .buttonStyle(.plain)
                             } else {
-                                Button(action: { if !vm.isGenerating { let t = inputText; inputText = ""; vm.sendMessage(t) } }) {
+                                Button(action: {
+                                    let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    if !vm.isGenerating && !t.isEmpty {
+                                        inputText = ""
+                                        vm.sendMessage(t)
+                                    }
+                                }) {
                                     Image(systemName: "arrow.up.circle.fill")
                                         .font(.system(size: 32))
-                                        .foregroundStyle(inputText.isEmpty ? AnyShapeStyle(Color.gray) : AnyShapeStyle(Color.blue.gradient))
+                                        .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? AnyShapeStyle(Color.gray) : AnyShapeStyle(Color.blue.gradient))
                                 }
                                 .buttonStyle(.plain)
-                                .disabled(inputText.isEmpty)
+                                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
                         }.padding(.horizontal, 16).padding(.vertical, 12).background(.ultraThinMaterial)
                     }
@@ -285,37 +331,35 @@ struct AetheriumView: View {
                                     Text(vm.isGenerating ? "Generating..." : (vm.isAudioPlaying ? "Playing..." : "Ready")).font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor((vm.isGenerating || vm.isAudioPlaying) ? .primary : .secondary)
                                 }
                                 .padding(.leading, 8).padding(.trailing, vm.isGenerating ? 8 : 4).padding(.vertical, 4)
-                                if vm.aiProvider == .appleIntelligence {
-                                    HStack(spacing: 4) {
-                                        ZStack(alignment: .leading) {
-                                            Capsule()
-                                                .fill(Color.secondary.opacity(0.15))
-                                                .frame(width: 56, height: 4)
-                                            Capsule()
-                                                .fill(contextIndicatorColor(vm.contextUsageRatio).gradient)
-                                                .frame(width: max(0, 56 * vm.contextUsageRatio), height: 4)
-                                                .animation(.easeInOut(duration: 0.4), value: vm.contextUsageRatio)
-                                        }
-                                        Text("\(Int(vm.contextUsageRatio * 100))%")
-                                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                            .foregroundColor(contextIndicatorColor(vm.contextUsageRatio))
-                                            .lineLimit(1)
-                                            .fixedSize()
+                                HStack(spacing: 4) {
+                                    ZStack(alignment: .leading) {
+                                        Capsule()
+                                            .fill(Color.secondary.opacity(0.15))
+                                            .frame(width: 56, height: 4)
+                                        Capsule()
+                                            .fill(contextIndicatorColor(vm.contextUsageRatio).gradient)
+                                            .frame(width: max(0, 56 * vm.contextUsageRatio), height: 4)
                                             .animation(.easeInOut(duration: 0.4), value: vm.contextUsageRatio)
                                     }
-                                    .help("推定コンテキスト使用量: \(Int(vm.contextUsageRatio * 100))%（約4096トークン想定）")
+                                    Text("\(Int(vm.contextUsageRatio * 100))%")
+                                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                        .foregroundColor(contextIndicatorColor(vm.contextUsageRatio))
+                                        .lineLimit(1)
+                                        .fixedSize()
+                                        .animation(.easeInOut(duration: 0.4), value: vm.contextUsageRatio)
                                 }
+                                .help(vm.aiProvider == .ollama
+                                    ? "コンテキスト使用量: \(vm.ollamaContextUsedTokens) / \(vm.ollamaContextSize) tokens (\(Int(vm.contextUsageRatio * 100))%)"
+                                    : "推定コンテキスト使用量: \(Int(vm.contextUsageRatio * 100))%（約4096トークン想定）")
                                 Divider().frame(height: 16).padding(.horizontal, 2)
-                                if vm.aiProvider == .appleIntelligence {
-                                    Button(action: { vm.clearContext() }) {
-                                        Image(systemName: "arrow.counterclockwise")
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                    .disabled(vm.isGenerating)
-                                    .help("コンテキストをクリア（会話履歴はそのまま残ります）")
-                                    Divider().frame(height: 16).padding(.horizontal, 2)
+                                Button(action: { vm.clearContext() }) {
+                                    Image(systemName: "arrow.counterclockwise")
                                 }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(vm.isGenerating)
+                                .help("コンテキストをクリア（会話履歴はそのまま残ります）")
+                                Divider().frame(height: 16).padding(.horizontal, 2)
                                 Button(action: { withAnimation { inputText = ""; vm.resetSession() } }) { Text("Exit").fontWeight(.medium).foregroundColor(.red) }.buttonStyle(.bordered).controlSize(.small)
                                 Spacer().frame(width: 6)
                             }
@@ -343,6 +387,13 @@ struct AetheriumView: View {
         if ratio < 0.8 { return .orange }
         return .red
     }
+
+    private func contextSizeLabel(_ size: Int) -> String {
+        let k = size / 1024
+        return "\(k)K"
+    }
+
+
 
     private func settingRow(title: String, icon: String, selection: Binding<Int>, options: [(id: Int, name: String)], placeholder: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {

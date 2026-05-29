@@ -65,15 +65,19 @@ final class ChatViewModel: ObservableObject {
     @Published var webSearchEnabled: Bool = false
     @Published var searxngURL: String = "http://localhost:8080"
     @Published var contextUsageRatio: Double = 0.0
-
+    @Published var ollamaContextSize: Int = 4096
+    static let ollamaContextSizeOptions = [2048, 4096, 8192, 16384, 32768, 65536]
+    @Published var ollamaToolsSupported: Bool = false
+    @Published var ollamaContextUsedTokens: Int = 0
     private let estimatedContextCharLimit = 8192  // ~4096 tokens * 2 chars/token
     private let searchResultsCollector = SearchResultsCollector()
+    private var ollamaContextStartIndex: Int = 0
     private var generatingTask: Task<Void, Never>?
     private var speechQueue: [(text: String, sessionID: UUID)] = []
     private var speechQueueTask: Task<Void, Never>?
     private var currentAudioSessionID: UUID? = nil
     private var streamTask: URLSessionTask?
-    private var playbackStateObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var playbackStateObserver: NSObjectProtocol?
     private var foundationSession: LanguageModelSession?
 
     var currentSpeakerName: String { displaySpeakers.first(where: { $0.id == selectedSpeakerID })?.name ?? "AI" }
@@ -115,6 +119,8 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Context usage tracking
+
     private func segmentCharCount(_ segments: [Transcript.Segment]) -> Int {
         segments.reduce(0) { count, seg in
             if case .text(let ts) = seg { return count + ts.content.count }
@@ -123,19 +129,26 @@ final class ChatViewModel: ObservableObject {
     }
 
     func updateContextUsage() {
-        guard let session = foundationSession else { contextUsageRatio = 0.0; return }
-        let totalChars: Int = session.transcript.reduce(0) { total, entry in
-            switch entry {
-            case .prompt(let p):       return total + segmentCharCount(p.segments)
-            case .response(let r):     return total + segmentCharCount(r.segments)
-            case .instructions(let i): return total + segmentCharCount(i.segments)
-            case .toolOutput(let to):  return total + segmentCharCount(to.segments)
-            case .toolCalls: return total
-            @unknown default:          return total
+        if aiProvider == .appleIntelligence {
+            guard let session = foundationSession else { contextUsageRatio = 0.0; return }
+            let totalChars: Int = session.transcript.reduce(0) { total, entry in
+                switch entry {
+                case .prompt(let p):       return total + segmentCharCount(p.segments)
+                case .response(let r):     return total + segmentCharCount(r.segments)
+                case .instructions(let i): return total + segmentCharCount(i.segments)
+                case .toolOutput(let to):  return total + segmentCharCount(to.segments)
+                case .toolCalls: return total
+                @unknown default:          return total
+                }
             }
+            contextUsageRatio = min(1.0, Double(totalChars) / Double(estimatedContextCharLimit))
+        } else {
+            guard ollamaContextSize > 0 else { contextUsageRatio = 0.0; return }
+            contextUsageRatio = min(1.0, Double(ollamaContextUsedTokens) / Double(ollamaContextSize))
         }
-        contextUsageRatio = min(1.0, Double(totalChars) / Double(estimatedContextCharLimit))
     }
+
+    // MARK: - Session management
 
     private let webSearchInstructions = "Web検索ツールを使用する場合、検索結果のテキストをそのまま出力しないでください。検索結果を参照して内容を理解し、自分の言葉で簡潔に回答してください。"
 
@@ -149,7 +162,11 @@ final class ChatViewModel: ObservableObject {
         guard let current = foundationSession else { return makeSession() }
         let all = Array(current.transcript)
         let instructions = all.filter { if case .instructions = $0 { return true }; return false }
-        let exchanges = all.filter { if case .instructions = $0 { return false }; return true }
+        var exchanges = all.filter { if case .instructions = $0 { return false }; return true }
+        // 文脈超過で失敗した末尾のプロンプトを除外（リトライ時に同じ text が再投入されるため重複防止）
+        if let last = exchanges.last, case .prompt = last {
+            exchanges.removeLast()
+        }
         let trimmed = Transcript(entries: instructions + exchanges.suffix(4))
         return webSearchEnabled
             ? LanguageModelSession(tools: [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL)], transcript: trimmed)
@@ -158,8 +175,48 @@ final class ChatViewModel: ObservableObject {
 
     func clearContext() {
         stopGeneration()
-        foundationSession = makeSession()
+        if aiProvider == .appleIntelligence {
+            foundationSession = makeSession()
+        } else {
+            ollamaContextStartIndex = messages.count
+            ollamaContextUsedTokens = 0
+        }
         messages.append(Message(role: "system", content: "コンテキストをリセットしました"))
+        updateContextUsage()
+    }
+
+    private func trimHistoryToFit() {
+        // トリガー: 前ターンのAPI報告トークン数が80%を超えた場合のみ実行
+        // （文字数推定ではなく実際のトークン数を使うことでバー表示と一致させる）
+        guard ollamaContextUsedTokens >= ollamaContextSize * 4 / 5 else { return }
+
+        let newUserIdx = messages.count - 2  // 末尾はplaceholder、その手前が今回のユーザーメッセージ
+        let trimmable = messages.indices.filter {
+            $0 >= ollamaContextStartIndex && $0 < newUserIdx && messages[$0].role != "system"
+        }
+        guard !trimmable.isEmpty else { return }
+
+        // 削る量: コンテキスト使用率が約35%になるまで古い順に削る
+        // 50%だとトリム直後の再評価＋応答で100%を超えうるため、余裕を持って削る
+        // 文字数 ≈ トークン数 × 2 と仮定 → 目標文字数 = ollamaContextSize × 0.35 × 2 = × 0.7
+        let targetChars = ollamaContextSize * 7 / 10
+        var totalChars = trimmable.reduce(messages[newUserIdx].content.count) {
+            $0 + messages[$1].content.count
+        }
+        var newStart = ollamaContextStartIndex
+        for idx in trimmable {
+            guard totalChars > targetChars else { break }
+            totalChars -= messages[idx].content.count
+            newStart = idx + 1
+        }
+        // 文字数推定で削り切れなくても最低1件は削る
+        if newStart == ollamaContextStartIndex {
+            newStart = trimmable[0] + 1
+        }
+
+        ollamaContextStartIndex = newStart
+        ollamaContextUsedTokens = 0
+        messages.insert(Message(role: "system", content: "コンテキストが上限に達したため古い会話を整理しました"), at: newUserIdx)
         updateContextUsage()
     }
 
@@ -184,6 +241,27 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Ollama model info
+
+    func fetchModelInfo(for model: String) async {
+        ollamaToolsSupported = false
+        guard let url = URL(string: "http://127.0.0.1:11434/api/show") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": model])
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            if let caps = json["capabilities"] as? [String] {
+                ollamaToolsSupported = caps.contains("tools")
+            }
+            // num_ctx の自動取得は行わない：ユーザーがスライダーで選んだ値を尊重する
+        } catch { }
+    }
+
+    // MARK: - Fetch
+
     func fetchAll() async {
         isFetching = true
         await fetchModels()
@@ -205,6 +283,9 @@ final class ChatViewModel: ObservableObject {
             print("LLM Server not found")
             self.models = []
         }
+        if !selectedModel.isEmpty {
+            await fetchModelInfo(for: selectedModel)
+        }
     }
 
     func fetchVVSpeakers() async {
@@ -212,9 +293,10 @@ final class ChatViewModel: ObservableObject {
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let decoded = try JSONDecoder().decode([VVSpeaker].self, from: data)
-            self.displaySpeakers = decoded.compactMap { speaker in
-                guard let firstStyle = speaker.styles.first else { return nil }
-                return (id: firstStyle.id, name: speaker.name)
+            self.displaySpeakers = decoded.flatMap { speaker in
+                speaker.styles.map { style in
+                    (id: style.id, name: "\(speaker.name) (\(style.name))")
+                }
             }.sorted { $0.name < $1.name }
             if let first = self.displaySpeakers.first,
                !self.displaySpeakers.contains(where: { $0.id == self.selectedSpeakerID }) {
@@ -247,6 +329,8 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Apple Intelligence
+
     private func sendMessageApple(_ text: String, retryAfterTrim: Bool = false) {
         guard let session = foundationSession else { return }
         stopGeneration()
@@ -264,7 +348,7 @@ final class ChatViewModel: ObservableObject {
             var localSpeechBuffer = ""
             let requestStartTime = Date()
             var firstTokenTime: Date? = nil
-            let indexForAssistant: () -> Int? = {
+            let indexForAssistant: @MainActor () -> Int? = {
                 self.messages.firstIndex(where: { $0.id == assistantID })
             }
 
@@ -303,9 +387,9 @@ final class ChatViewModel: ObservableObject {
                     await MainActor.run {
                         if let i = indexForAssistant() {
                             self.messages[i].stats = UsageStats(
-                                prompt_tokens: text.count,
-                                completion_tokens: charCount,
-                                total_tokens: text.count + charCount,
+                                promptTokens: text.count,
+                                completionTokens: charCount,
+                                totalTokens: text.count + charCount,
                                 tokensPerSecond: Double(charCount) / max(genDuration, 0.001),
                                 ttft: ttft
                             )
@@ -373,97 +457,276 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Ollama
+
+    private var ollamaWebSearchToolSpec: [String: Any] {
+        [
+            "type": "function",
+            "function": [
+                "name": "webSearch",
+                "description": "SearXNGを使って最新のWeb情報を検索します。最新情報や時事問題について質問されたときに使用してください。",
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "query": ["type": "string", "description": "検索するクエリ文字列"]
+                    ],
+                    "required": ["query"]
+                ]
+            ]
+        ]
+    }
+
+    private func executeWebSearch(query: String) async -> String {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "\(searxngURL)/search?q=\(encoded)&format=json") else {
+            return "検索できませんでした"
+        }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let results = json["results"] as? [[String: Any]] else {
+                return "検索結果を解析できませんでした"
+            }
+            var summaries: [String] = []
+            for r in results.prefix(5) {
+                guard let title = r["title"] as? String else { continue }
+                let content = r["content"] as? String ?? ""
+                let resultURL = r["url"] as? String ?? ""
+                await searchResultsCollector.append(SearchSource(title: title, url: resultURL))
+                summaries.append("\(title)\n\(content)\n\(resultURL)")
+            }
+            return summaries.isEmpty ? "検索結果が見つかりませんでした" : summaries.joined(separator: "\n\n---\n\n")
+        } catch {
+            return "SearXNGへの接続に失敗しました: \(error.localizedDescription)"
+        }
+    }
+
     private func sendMessageOllama(_ text: String) {
         stopGeneration()
         isGenerating = true
         let audioSessionID = UUID()
         currentAudioSessionID = audioSessionID
         let assistantID = UUID()
-        self.messages.append(Message(role: "user", content: text))
-        self.messages.append(Message(id: assistantID, role: "assistant", content: ""))
-        let requestMessages = self.messages.dropLast().map { ["role": $0.role, "content": $0.content] }
-        let requestModel = self.selectedModel
+        messages.append(Message(role: "user", content: text))
+        messages.append(Message(id: assistantID, role: "assistant", content: ""))
+
         generatingTask = Task {
+            await searchResultsCollector.reset()
+            var localSpeechBuffer = ""
             let requestStartTime = Date()
             var firstTokenTime: Date?
-            var localSpeechBuffer = ""
-            let indexForAssistant: () -> Int? = {
-                return self.messages.firstIndex(where: { $0.id == assistantID })
+
+            let indexForAssistant: @MainActor () -> Int? = {
+                self.messages.firstIndex(where: { $0.id == assistantID })
             }
 
-            guard let url = URL(string: "\(llmServerURL)/chat/completions") else {
-                await MainActor.run {
-                    self.isGenerating = false
-                    self.generatingTask = nil
-                    self.currentAudioSessionID = nil
-                }
-                return
-            }
-            var request = URLRequest(url: url); request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: [
-                "model": requestModel,
-                "messages": requestMessages,
-                "stream": true,
-                "stream_options": ["include_usage": true]
-            ])
+            // リクエスト前にトークン推定でトリム（Ollamaへ送る前に収める）
+            trimHistoryToFit()
 
-            do {
-                let (stream, _) = try await URLSession.shared.bytes(for: request)
-                await MainActor.run {
-                    self.streamTask = stream.task
+            // Build history from context window, excluding visual system messages
+            var history: [[String: Any]] = Array(self.messages[self.ollamaContextStartIndex...])
+                .dropLast()  // exclude empty assistant placeholder
+                .filter { $0.role != "system" }
+                .map { ["role": $0.role, "content": $0.content] }
+
+            let useTools = self.webSearchEnabled && self.ollamaToolsSupported
+            var toolRoundCount = 0
+            // KVキャッシュヒット時: prompt_tokens = 新規評価分のみ（小さい） → 累積で補う
+            // トリム直後:          prompt_tokens = 履歴全体の再評価（大きい・正確） → 実測値で上書き
+            // max(累積+completion, prompt+completion) で両方を正しく処理する
+            var roundTotalTokens: Int = 0      // prompt + completion の合計（全ラウンド分）
+            var roundCompletionTokens: Int = 0 // completion のみ（全ラウンド分）
+
+            mainLoop: repeat {
+                // ラウンド毎の計測（tokensPerSecond をそのラウンドの実速度で出すため）
+                let roundStartTime = Date()
+                var roundFirstTokenTime: Date? = nil
+                var requestBody: [String: Any] = [
+                    "model": self.selectedModel,
+                    "messages": history,
+                    "stream": true,
+                    "stream_options": ["include_usage": true],
+                    "options": ["num_ctx": self.ollamaContextSize]
+                ]
+                if useTools {
+                    requestBody["tools"] = [self.ollamaWebSearchToolSpec]
                 }
-                for try await line in stream.lines {
-                    if Task.isCancelled { break }
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmed.hasPrefix("data: [DONE]") || trimmed == "data: [DONE]" { break }
-                    if line.hasPrefix("data: "), let data = line.dropFirst(6).data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        if let choices = json["choices"] as? [[String: Any]],
-                           let delta = choices.first?["delta"] as? [String: Any],
-                           let content = delta["content"] as? String {
-                            if firstTokenTime == nil { firstTokenTime = Date() }
-                            await MainActor.run {
-                                if let i = indexForAssistant() {
-                                    self.messages[i].content += content
-                                }
-                            }
-                            localSpeechBuffer += content
-                            if content.contains(where: { "。！？\n".contains($0) }) {
-                                let sentence = localSpeechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-                                if !sentence.isEmpty && !Task.isCancelled {
-                                    await MainActor.run { self.enqueueSpeech(sentence, sessionID: audioSessionID) }
-                                }
-                                localSpeechBuffer = ""
+
+                guard let url = URL(string: "\(self.llmServerURL)/chat/completions") else { break }
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+
+                var finishReason: String? = nil
+                var accumulatedToolCalls: [Int: (id: String, name: String, arguments: String)] = [:]
+
+                do {
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+
+                    // Check HTTP status before streaming
+                    if let httpResp = response as? HTTPURLResponse, httpResp.statusCode != 200 {
+                        var errorData = Data()
+                        for try await byte in bytes { errorData.append(byte) }
+                        let errorMsg: String
+                        if let json = try? JSONSerialization.jsonObject(with: errorData) as? [String: Any],
+                           let err = json["error"] as? String {
+                            errorMsg = err
+                        } else {
+                            errorMsg = "HTTP \(httpResp.statusCode)"
+                        }
+                        print("[Ollama Error] \(errorMsg)")
+                        await MainActor.run {
+                            if let i = indexForAssistant() {
+                                self.messages[i].content = "⚠️ エラー: \(errorMsg)"
                             }
                         }
-                        if let usageDict = json["usage"] as? [String: Int] {
-                            let totalDuration = Date().timeIntervalSince(firstTokenTime ?? requestStartTime)
-                            let ttftValue = firstTokenTime?.timeIntervalSince(requestStartTime)
+                        break mainLoop
+                    }
+
+                    await MainActor.run { self.streamTask = bytes.task }
+
+                    for try await line in bytes.lines {
+                        if Task.isCancelled { break }
+                        guard line.hasPrefix("data: ") else { continue }
+                        let payload = line.dropFirst(6)
+                        if payload == "[DONE]" { break }
+                        guard let data = payload.data(using: .utf8),
+                              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                        else { continue }
+
+                        if let choices = json["choices"] as? [[String: Any]], let first = choices.first {
+                            if let fr = first["finish_reason"] as? String { finishReason = fr }
+                            if let delta = first["delta"] as? [String: Any] {
+                                // Regular content delta
+                                if let content = delta["content"] as? String, !content.isEmpty {
+                                    if firstTokenTime == nil { firstTokenTime = Date() }
+                                    if roundFirstTokenTime == nil { roundFirstTokenTime = Date() }
+                                    await MainActor.run {
+                                        if let i = indexForAssistant() { self.messages[i].content += content }
+                                    }
+                                    localSpeechBuffer += content
+                                    if content.contains(where: { "。！？\n".contains($0) }) {
+                                        let sentence = localSpeechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        if !sentence.isEmpty && !Task.isCancelled {
+                                            await MainActor.run { self.enqueueSpeech(sentence, sessionID: audioSessionID) }
+                                        }
+                                        localSpeechBuffer = ""
+                                    }
+                                }
+                                // Accumulate streaming tool call fragments
+                                if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
+                                    for tc in toolCalls {
+                                        let idx = tc["index"] as? Int ?? 0
+                                        var existing = accumulatedToolCalls[idx] ?? (id: "", name: "", arguments: "")
+                                        if let id = tc["id"] as? String, !id.isEmpty { existing.id = id }
+                                        if let fn = tc["function"] as? [String: Any] {
+                                            if let name = fn["name"] as? String, !name.isEmpty { existing.name = name }
+                                            if let args = fn["arguments"] as? String { existing.arguments += args }
+                                        }
+                                        accumulatedToolCalls[idx] = existing
+                                    }
+                                }
+                            }
+                        }
+
+                        // Usage stats (sent in final chunk by Ollama)
+                        if let usageDict = json["usage"] as? [String: Any] {
+                            let promptTokens = usageDict["prompt_tokens"] as? Int ?? 0
+                            let completionTokens = usageDict["completion_tokens"] as? Int ?? 0
+                            let totalTokens = usageDict["total_tokens"] as? Int ?? (promptTokens + completionTokens)
+                            // tokensPerSecond は当該ラウンド内の生成時間で算出（ツールラウンドを跨ぐと不正確になるため）
+                            let roundDuration = Date().timeIntervalSince(roundFirstTokenTime ?? roundStartTime)
+                            // TTFT はユーザーが押してから最初の可視トークンまで（全ラウンド通算）
+                            let ttft = firstTokenTime?.timeIntervalSince(requestStartTime)
+                            roundTotalTokens += promptTokens + completionTokens
+                            roundCompletionTokens += completionTokens
                             await MainActor.run {
                                 if let i = indexForAssistant() {
-                                    self.messages[i].stats = UsageStats(prompt_tokens: usageDict["prompt_tokens"] ?? 0, completion_tokens: usageDict["completion_tokens"] ?? 0, total_tokens: usageDict["total_tokens"] ?? 0, tokensPerSecond: Double(usageDict["completion_tokens"] ?? 0) / max(totalDuration, 0.001), ttft: ttftValue)
+                                    self.messages[i].stats = UsageStats(
+                                        promptTokens: promptTokens,
+                                        completionTokens: completionTokens,
+                                        totalTokens: totalTokens,
+                                        tokensPerSecond: Double(completionTokens) / max(roundDuration, 0.001),
+                                        ttft: ttft
+                                    )
                                 }
                             }
                         }
                     }
+
+                    // Flush any remaining buffered speech for this round
+                    if !Task.isCancelled && !localSpeechBuffer.isEmpty {
+                        await MainActor.run { self.enqueueSpeech(localSpeechBuffer, sessionID: audioSessionID) }
+                        localSpeechBuffer = ""
+                    }
+
+                } catch {
+                    let nsErr = error as NSError
+                    guard nsErr.code != NSURLErrorCancelled && !Task.isCancelled else { break mainLoop }
+                    let detail = "code: \(nsErr.code) — \(error.localizedDescription)"
+                    print("[Ollama Error] \(detail)")
+                    await MainActor.run {
+                        if let i = indexForAssistant(), self.messages[i].content.isEmpty {
+                            self.messages[i].content = "⚠️ エラー: \(detail)"
+                        }
+                    }
+                    break mainLoop
                 }
-                if !Task.isCancelled && !localSpeechBuffer.isEmpty {
-                    await MainActor.run { self.enqueueSpeech(localSpeechBuffer, sessionID: audioSessionID) }
-                    localSpeechBuffer = ""
+
+                // If model requested tool calls, execute them and loop
+                if finishReason == "tool_calls" && !accumulatedToolCalls.isEmpty && toolRoundCount < 3 {
+                    let currentContent = await MainActor.run {
+                        indexForAssistant().map { self.messages[$0].content } ?? ""
+                    }
+                    var assistantHistoryMsg: [String: Any] = ["role": "assistant", "content": currentContent]
+                    assistantHistoryMsg["tool_calls"] = accumulatedToolCalls.sorted(by: { $0.key < $1.key }).map { (_, tc) -> [String: Any] in
+                        ["id": tc.id, "type": "function", "function": ["name": tc.name, "arguments": tc.arguments] as [String: Any]]
+                    }
+                    history.append(assistantHistoryMsg)
+
+                    await MainActor.run {
+                        if let i = indexForAssistant() { self.messages[i].content = "" }
+                    }
+
+                    for (_, tc) in accumulatedToolCalls.sorted(by: { $0.key < $1.key }) {
+                        guard tc.name == "webSearch",
+                              let argData = tc.arguments.data(using: .utf8),
+                              let argJson = try? JSONSerialization.jsonObject(with: argData) as? [String: Any],
+                              let query = argJson["query"] as? String else {
+                            history.append(["role": "tool", "tool_call_id": tc.id, "content": "ツール不明"])
+                            continue
+                        }
+                        let result = await self.executeWebSearch(query: query)
+                        history.append(["role": "tool", "tool_call_id": tc.id, "content": result] as [String: Any])
+                    }
+
+                    toolRoundCount += 1
+                } else {
+                    break mainLoop
                 }
-            } catch {
-                if (error as NSError).code != NSURLErrorCancelled {
-                    print("Stream error: \(error)")
-                }
-            }
+            } while true
+
+            // Attach search sources to assistant message
+            let sources = await searchResultsCollector.sources
             await MainActor.run {
+                if !sources.isEmpty, let i = indexForAssistant() {
+                    self.messages[i].searchSources = sources
+                }
+                // KVキャッシュヒット時は累積+completion、再評価時は実測値(roundTotalTokens)、どちらか大きい方
+                self.ollamaContextUsedTokens = max(
+                    self.ollamaContextUsedTokens + roundCompletionTokens,
+                    roundTotalTokens
+                )
+                self.updateContextUsage()
                 self.isGenerating = false
                 self.generatingTask = nil
                 self.streamTask = nil
             }
         }
     }
+
+    // MARK: - Speech
 
     private func enqueueSpeech(_ text: String, sessionID: UUID) {
         speechQueue.append((text: text, sessionID: sessionID))
@@ -522,6 +785,9 @@ final class ChatViewModel: ObservableObject {
         stopGeneration()
         messages = []
         isInSession = false
+        ollamaContextStartIndex = 0
+        ollamaContextUsedTokens = 0
+        contextUsageRatio = 0.0
         if aiProvider == .appleIntelligence {
             foundationSession = makeSession()
         }
