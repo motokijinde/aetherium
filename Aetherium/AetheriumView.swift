@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct MessageBubble: View {
     let message: Message
@@ -157,10 +158,98 @@ struct MessageBubble: View {
     }
 }
 
+// 複数行入力欄（NSTextView ラッパー）
+// Enter で送信、Shift+Enter で改行。改行はそのまま text に保持される。
+// 入力内容に応じて高さが 1〜5 行の範囲で自動伸縮し、5行を超えるとスクロールする。
+struct MultilineInputField: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var height: CGFloat
+    var maxLines: Int = 5
+    var onSubmit: () -> Void
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .noBorder
+        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.font = .systemFont(ofSize: NSFont.systemFontSize)
+        textView.textContainerInset = NSSize(width: 6, height: 8)
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.allowsUndo = true
+        textView.string = text
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? NSTextView else { return }
+        if textView.string != text {
+            textView.string = text
+        }
+        recalculateHeight(textView)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    // 内容の行数に応じた高さを計算し、1〜maxLines 行でクランプして height に反映する
+    func recalculateHeight(_ textView: NSTextView) {
+        guard let lm = textView.layoutManager, let tc = textView.textContainer else { return }
+        lm.ensureLayout(for: tc)
+        let font = textView.font ?? .systemFont(ofSize: NSFont.systemFontSize)
+        let lineHeight = lm.defaultLineHeight(for: font)
+        let inset = textView.textContainerInset.height * 2
+        let minH = ceil(lineHeight) + inset
+        let maxH = ceil(lineHeight * CGFloat(maxLines)) + inset
+        let contentH = ceil(lm.usedRect(for: tc).height) + inset
+        let newH = min(max(contentH, minH), maxH)
+        if abs(newH - height) > 0.5 {
+            DispatchQueue.main.async { height = newH }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: MultilineInputField
+        init(_ parent: MultilineInputField) { self.parent = parent }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+            parent.recalculateHeight(textView)
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let shiftPressed = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
+                if shiftPressed {
+                    textView.insertNewlineIgnoringFieldEditor(nil)
+                } else {
+                    parent.onSubmit()
+                }
+                return true
+            }
+            return false
+        }
+    }
+}
+
 struct AetheriumView: View {
     @StateObject private var vm = ChatViewModel()
     @State private var inputText = ""
     @State private var rotationAngle: Double = 0
+    @State private var inputHeight: CGFloat = 38
+
+    private func submitInput() {
+        let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !vm.isGenerating && !t.isEmpty {
+            inputText = ""
+            vm.sendMessage(t)
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -289,13 +378,10 @@ struct AetheriumView: View {
                             }
                         }
                         HStack(spacing: 12) {
-                            TextField("メッセージを入力...", text: $inputText).textFieldStyle(.plain).padding(.horizontal, 16).padding(.vertical, 10).background(Capsule().fill(Color.primary.opacity(0.05))).onSubmit {
-                                let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-                                if !vm.isGenerating && !t.isEmpty {
-                                    inputText = ""
-                                    vm.sendMessage(t)
-                                }
-                            }
+                            MultilineInputField(text: $inputText, height: $inputHeight, onSubmit: { submitInput() })
+                                .frame(height: inputHeight)
+                                .padding(.horizontal, 8)
+                                .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.primary.opacity(0.05)))
                             if vm.isGenerating || vm.isAudioPlaying {
                                 Button(action: { vm.stopGeneration() }) {
                                     Image(systemName: "stop.circle.fill")
@@ -304,13 +390,7 @@ struct AetheriumView: View {
                                 }
                                 .buttonStyle(.plain)
                             } else {
-                                Button(action: {
-                                    let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    if !vm.isGenerating && !t.isEmpty {
-                                        inputText = ""
-                                        vm.sendMessage(t)
-                                    }
-                                }) {
+                                Button(action: { submitInput() }) {
                                     Image(systemName: "arrow.up.circle.fill")
                                         .font(.system(size: 32))
                                         .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? AnyShapeStyle(Color.gray) : AnyShapeStyle(Color.blue.gradient))
