@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import MarkdownUI
 
 struct MessageBubble: View {
     let message: Message
@@ -38,7 +39,14 @@ struct MessageBubble: View {
                             }
                         }
                     } else {
-                        Text(message.content).padding(.horizontal, 14).padding(.vertical, 10).background(isUser ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(Color.gray.opacity(0.15).gradient)).foregroundColor(isUser ? .white : .primary).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)).textSelection(.enabled)
+                        Group {
+                            if isUser || isLoadingActive {
+                                Text(message.content)
+                            } else {
+                                Markdown(message.content)
+                            }
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 10).background(isUser ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(Color.gray.opacity(0.15).gradient)).foregroundColor(isUser ? .white : .primary).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)).textSelection(.enabled)
                     }
                     if let sources = message.searchSources, !sources.isEmpty, !isUser {
                         VStack(alignment: .leading, spacing: 3) {
