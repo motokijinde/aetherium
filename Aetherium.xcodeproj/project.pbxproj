@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AE0000000000000000000001 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = AE0000000000000000000003 /* MarkdownUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,7 +39,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AE0000000000000000000001 /* MarkdownUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -83,7 +81,6 @@
 			);
 			name = Aetherium;
 			packageProductDependencies = (
-				AE0000000000000000000003 /* MarkdownUI */,
 			);
 			productName = ContentView;
 			productReference = CED1FEEA2F37121800250859 /* Aetherium.app */;
@@ -113,10 +110,9 @@
 			);
 			mainGroup = CED1FEE12F37121800250859;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
 			packageReferences = (
-				AE0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */,
 			);
+			preferredProjectObjectVersion = 77;
 			productRefGroup = CED1FEEB2F37121800250859 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -376,24 +372,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		AE0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/gonzalezreal/swift-markdown-ui";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.0.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		AE0000000000000000000003 /* MarkdownUI */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AE0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */;
-			productName = MarkdownUI;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = CED1FEE22F37121800250859 /* Project object */;
 }

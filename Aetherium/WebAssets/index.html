@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="katex.min.css">
+<script src="katex.min.js"></script>
+<script src="auto-render.min.js"></script>
+<script src="marked.min.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    font-size: 13px;
+    line-height: 1.55;
+    color: #1d1d1f;
+    -webkit-text-size-adjust: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  body.dark { color: #f5f5f7; }
+  /* 内容の自然な幅(=折り返さない最長行)を基準に吹き出しをフィットさせる。
+     width:max-content は親の幅に依存しないため、幅が縮み続ける負のループを防げる。
+     max-width はウィンドウ最小幅(600)でもはみ出さない安全値。 */
+  #content { display: inline-block; width: max-content; max-width: 440px; }
+  #content > :first-child { margin-top: 0; }
+  #content > :last-child { margin-bottom: 0; }
+  p { margin: 0 0 0.5em; }
+  pre {
+    background: rgba(127,127,127,0.15);
+    padding: 8px 10px;
+    border-radius: 8px;
+    overflow-x: auto;
+  }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.9em; }
+  :not(pre) > code {
+    background: rgba(127,127,127,0.18);
+    padding: 1px 4px;
+    border-radius: 4px;
+  }
+  pre code { background: none; padding: 0; }
+  ul, ol { margin: 0.3em 0; padding-left: 1.4em; }
+  li { margin: 2px 0; }
+  a { color: #0a84ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table { border-collapse: collapse; margin: 0.4em 0; }
+  th, td { border: 1px solid rgba(127,127,127,0.4); padding: 3px 8px; }
+  blockquote {
+    margin: 0.3em 0;
+    padding-left: 10px;
+    border-left: 3px solid rgba(127,127,127,0.4);
+  }
+  hr { border: none; border-top: 1px solid rgba(127,127,127,0.3); margin: 0.6em 0; }
+  img { max-width: 100%; }
+  .katex-display { margin: 0.4em 0; overflow-x: auto; overflow-y: hidden; }
+</style>
+</head>
+<body>
+<div id="content"></div>
+<script>
+function postSize() {
+  var el = document.getElementById("content");
+  var rect = el.getBoundingClientRect();
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.size) {
+    window.webkit.messageHandlers.size.postMessage({
+      w: Math.ceil(rect.width),
+      h: Math.ceil(rect.height)
+    });
+  }
+}
+
+function escapeHTML(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Markdown より先に数式を退避し、marked による誤変換（$H_1$ の _ が斜体化する等）を防ぐ。
+function protectMath(md) {
+  var store = [];
+  function ph(raw) { store.push(raw); return "" + (store.length - 1) + ""; }
+  md = md.replace(/\$\$([\s\S]+?)\$\$/g, function (m) { return ph(m); });
+  md = md.replace(/\\\[([\s\S]+?)\\\]/g, function (m) { return ph(m); });
+  md = md.replace(/\\\(([\s\S]+?)\\\)/g, function (m) { return ph(m); });
+  // $ ... $（インライン）。通貨表記（"$5 to $10" 等）は数式扱いしない。
+  md = md.replace(/(?<![\\$])\$([^$\n]+?)(?<![\\\s])\$(?!\d)/g, function (m, inner) {
+    var t = inner.trim();
+    if (/^\d/.test(t) && /\s/.test(inner) && inner.indexOf("\\") < 0) return m;
+    return ph("\\(" + inner + "\\)");
+  });
+  return { md: md, store: store };
+}
+
+function setMaxWidth(w) {
+  document.getElementById("content").style.maxWidth = w + "px";
+  postSize();
+}
+
+// marked が CJK 約物隣接の **太字** を処理できず素の "**...**" が残ることがあるため、
+// 残ったものだけを後処理で <strong> 化する。コード/数式の中は対象外。
+function applyCJKBold(root) {
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  var targets = [];
+  var node;
+  while ((node = walker.nextNode())) {
+    if (node.parentElement && node.parentElement.closest("code, pre, .katex")) continue;
+    if (/\*\*[^*\n]+?\*\*/.test(node.nodeValue)) targets.push(node);
+  }
+  targets.forEach(function (textNode) {
+    var frag = document.createDocumentFragment();
+    textNode.nodeValue.split(/(\*\*[^*\n]+?\*\*)/g).forEach(function (part) {
+      var m = part.match(/^\*\*([^*\n]+?)\*\*$/);
+      if (m) {
+        var strong = document.createElement("strong");
+        strong.textContent = m[1];
+        frag.appendChild(strong);
+      } else if (part) {
+        frag.appendChild(document.createTextNode(part));
+      }
+    });
+    textNode.parentNode.replaceChild(frag, textNode);
+  });
+}
+
+function setContent(b64, dark, maxW) {
+  document.body.className = dark ? "dark" : "light";
+  var md = decodeURIComponent(escape(atob(b64)));
+  var p = protectMath(md);
+  var html = marked.parse(p.md, { gfm: true, breaks: true });
+  // 退避した数式を HTML エスケープしつつ復元（KaTeX がテキストノードとして処理する）。
+  html = html.replace(/(\d+)/g, function (_, i) { return escapeHTML(p.store[+i]); });
+  var el = document.getElementById("content");
+  el.style.maxWidth = maxW + "px";
+  el.innerHTML = html;
+  // 数式が無ければ KaTeX 走査をスキップ（大半の普通の文章で毎回の DOM 走査を省ける）。
+  if (p.store.length) {
+    try {
+      renderMathInElement(el, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "\\(", right: "\\)", display: false }
+        ],
+        throwOnError: false
+      });
+    } catch (e) {}
+  }
+  // 太字の取りこぼし(**...**)が残っているときだけ後処理する。
+  if (html.indexOf("**") >= 0) applyCJKBold(el);
+  postSize();
+  // Web フォント読み込み後にレイアウトが変わるため再計測する。
+  setTimeout(postSize, 60);
+  setTimeout(postSize, 300);
+}
+
+window.addEventListener("resize", postSize);
+</script>
+</body>
+</html>

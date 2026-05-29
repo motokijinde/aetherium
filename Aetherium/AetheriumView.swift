@@ -1,14 +1,16 @@
 import SwiftUI
 import AppKit
-import MarkdownUI
 
 struct MessageBubble: View {
     let message: Message
     let speakerName: String
     let isLoadingActive: Bool
+    let maxContentWidth: CGFloat
     var isUser: Bool { message.role == "user" }
+    @Environment(\.colorScheme) private var colorScheme
     @State private var dotOpacity: [Double] = [1.0, 0.6, 0.6]
     @State private var hoveredStatIndex: Int? = nil
+    @State private var webSize: CGSize = .zero
     var body: some View {
         if message.role == "system" {
             HStack(spacing: 8) {
@@ -39,14 +41,11 @@ struct MessageBubble: View {
                             }
                         }
                     } else {
-                        Group {
-                            if isUser || isLoadingActive {
-                                Text(message.content)
-                            } else {
-                                Markdown(message.content)
-                            }
-                        }
-                        .padding(.horizontal, 14).padding(.vertical, 10).background(isUser ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(Color.gray.opacity(0.15).gradient)).foregroundColor(isUser ? .white : .primary).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)).textSelection(.enabled)
+                        // 全メッセージ(ユーザー/アシスタント/生成中)を同じ KaTeX+marked の WebView で描画し、
+                        // 描画エンジン差による見た目のブレをなくす。青背景のユーザー吹き出しは白文字にする。
+                        MathMarkdownView(content: message.content, dark: isUser ? true : (colorScheme == .dark), maxWidth: maxContentWidth, size: $webSize)
+                            .frame(width: webSize.width > 0 ? webSize.width : nil, height: max(webSize.height, 1))
+                            .padding(.horizontal, 14).padding(.vertical, 10).background(isUser ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(Color.gray.opacity(0.15).gradient)).foregroundColor(isUser ? .white : .primary).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }
                     if let sources = message.searchSources, !sources.isEmpty, !isUser {
                         VStack(alignment: .leading, spacing: 3) {
@@ -245,11 +244,33 @@ struct MultilineInputField: NSViewRepresentable {
     }
 }
 
+/// スクロール追従の状態。@State(値型)ではなく参照型で保持することで、
+/// 高頻度なスクロール監視で値を更新してもビューの再描画を起こさない（＝軽い）。
+private final class ScrollTracker {
+    var lastHeight: CGFloat = 0
+    var autoFollow = true
+}
+
+/// スクロール監視で必要な幾何情報。Equatable にして変化時のみ action を呼ぶ。
+private struct ScrollState: Equatable {
+    var contentHeight: CGFloat
+    var offsetY: CGFloat
+    var containerHeight: CGFloat
+}
+
 struct AetheriumView: View {
     @StateObject private var vm = ChatViewModel()
     @State private var inputText = ""
     @State private var rotationAngle: Double = 0
     @State private var inputHeight: CGFloat = 38
+    @State private var tracker = ScrollTracker()
+    @State private var chatWidth: CGFloat = 600
+
+    /// チャット領域の幅から、吹き出しの最大幅を算出する。
+    /// アイコン・余白を差し引いた使える幅を使い、最小440px・最大720pxにクランプする。
+    private var maxBubbleWidth: CGFloat {
+        min(720, max(440, chatWidth - 140))
+    }
 
     private func submitInput() {
         let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -345,10 +366,18 @@ struct AetheriumView: View {
                                     }
                                 }
                             }
-                            settingRow(title: "Voice", icon: "mouth", selection: $vm.selectedSpeakerID, options: vm.displaySpeakers, placeholder: "VOICEVOXを起動してください")
                             VStack(alignment: .leading, spacing: 8) {
-                                Label("Speed: \(String(format: "%.2f", vm.speechSpeed))x", systemImage: "speedometer").font(.subheadline).bold()
-                                Slider(value: $vm.speechSpeed, in: 0.5...2.0)
+                                Toggle(isOn: $vm.voiceEnabled) {
+                                    Label("音声読み上げ (VOICEVOX)", systemImage: "speaker.wave.2.fill").font(.subheadline).bold()
+                                }
+                                .toggleStyle(.switch)
+                            }
+                            if vm.voiceEnabled {
+                                settingRow(title: "Voice", icon: "mouth", selection: $vm.selectedSpeakerID, options: vm.displaySpeakers, placeholder: "VOICEVOXを起動してください")
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("Speed: \(String(format: "%.2f", vm.speechSpeed))x", systemImage: "speedometer").font(.subheadline).bold()
+                                    Slider(value: $vm.speechSpeed, in: 0.5...2.0)
+                                }
                             }
                         }.padding(30).background(.thinMaterial).cornerRadius(24).frame(width: 380)
 
@@ -361,7 +390,7 @@ struct AetheriumView: View {
                             .clipShape(Capsule())
                             .disabled(!vm.canStartSession)
 
-                            if (vm.aiProvider == .ollama && vm.models.isEmpty) || vm.displaySpeakers.isEmpty {
+                            if (vm.aiProvider == .ollama && vm.models.isEmpty) || (vm.voiceEnabled && vm.displaySpeakers.isEmpty) {
                                 Button(action: { Task { await vm.fetchAll() } }) {
                                     Label(vm.isFetching ? "接続中..." : "再接続", systemImage: "arrow.clockwise")
                                 }
@@ -376,13 +405,36 @@ struct AetheriumView: View {
                     VStack(spacing: 0) {
                         ScrollViewReader { proxy in
                             ScrollView {
-                                LazyVStack(spacing: 0) { ForEach(vm.messages, id: \.id) { msg in let isLastMsg = (msg.id == vm.messages.last?.id); let isLoadingActive = isLastMsg && msg.role == "assistant" && vm.isGenerating; MessageBubble(message: msg, speakerName: vm.currentSpeakerName, isLoadingActive: isLoadingActive) } }.padding(.vertical, 10)
+                                LazyVStack(spacing: 0) { ForEach(vm.messages, id: \.id) { msg in let isLastMsg = (msg.id == vm.messages.last?.id); let isLoadingActive = isLastMsg && msg.role == "assistant" && vm.isGenerating; MessageBubble(message: msg, speakerName: vm.currentSpeakerName, isLoadingActive: isLoadingActive, maxContentWidth: maxBubbleWidth) } }.padding(.vertical, 10)
                                 Spacer().id("bottom")
                             }
-                            .onChange(of: vm.messages.last?.content) { _, _ in
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    proxy.scrollTo("bottom", anchor: .bottom)
+                            // 本文が伸びた(テキスト変化・WebViewの非同期な高さ報告)ときだけ下端へ追従する。
+                            // 状態は参照型(tracker)で持つのでこの監視では再描画が起きず軽い。アニメも付けない
+                            // ため、毎トークンのアニメ積み重ねによる固まりも起きない。
+                            .onScrollGeometryChange(for: ScrollState.self) { geo in
+                                ScrollState(contentHeight: geo.contentSize.height,
+                                            offsetY: geo.contentOffset.y,
+                                            containerHeight: geo.containerSize.height)
+                            } action: { _, s in
+                                if s.contentHeight > tracker.lastHeight + 0.5 {
+                                    // 内容が伸びた → 追従中なら下端へ。上を見てる間(autoFollow=false)は何もしない。
+                                    if tracker.autoFollow { proxy.scrollTo("bottom", anchor: .bottom) }
+                                } else {
+                                    // 高さ不変＝スクロール操作。下端付近かどうかで追従ON/OFFを切替（ユーザー操作を尊重）。
+                                    tracker.autoFollow = (s.contentHeight - s.offsetY - s.containerHeight) < 60
                                 }
+                                tracker.lastHeight = s.contentHeight
+                            }
+                            // チャット領域の幅を監視し、吹き出しの最大幅を追従させる（リサイズ時のみ発火）。
+                            .onScrollGeometryChange(for: CGFloat.self) { geo in
+                                geo.containerSize.width
+                            } action: { _, width in
+                                chatWidth = width
+                            }
+                            // 送信時は確実に下端まで追従させる。
+                            .onChange(of: vm.messages.count) { _, _ in
+                                tracker.autoFollow = true
+                                proxy.scrollTo("bottom", anchor: .bottom)
                             }
                         }
                         HStack(spacing: 12) {

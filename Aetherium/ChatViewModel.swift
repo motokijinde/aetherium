@@ -59,6 +59,7 @@ final class ChatViewModel: ObservableObject {
     @Published var selectedSpeakerID: Int = 3
     @Published var displaySpeakers: [(id: Int, name: String)] = []
     @Published var speechSpeed: Double = 1.00
+    @Published var voiceEnabled: Bool = true
     @Published var isFetching = false
     @Published var aiProvider: AIProvider = .ollama
     @Published var appleIntelligenceError: String? = nil
@@ -87,7 +88,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     var canStartSession: Bool {
-        let voiceReady = !displaySpeakers.isEmpty
+        let voiceReady = !voiceEnabled || !displaySpeakers.isEmpty
         if aiProvider == .appleIntelligence {
             return appleIntelligenceError == nil && voiceReady
         } else {
@@ -729,6 +730,7 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Speech
 
     private func enqueueSpeech(_ text: String, sessionID: UUID) {
+        guard voiceEnabled else { return }
         speechQueue.append((text: text, sessionID: sessionID))
         if speechQueueTask == nil {
             speechQueueTask = Task { await processSpeechQueue() }

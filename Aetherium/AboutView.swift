@@ -3,6 +3,7 @@ import SwiftUI
 struct AboutView: View {
     @Environment(\.dismiss) var dismiss
     @State private var isHoveringGitHub = false
+    @State private var showingLicenses = false
 
     // Xcode の General 設定から Version と Build を自動取得
     private var appVersion: String {
@@ -46,7 +47,15 @@ struct AboutView: View {
                     .underline(isHoveringGitHub)
                     .onHover { hovering in isHoveringGitHub = hovering }
             }
-            .padding([.top, .bottom], 20)
+            .padding(.top, 20)
+
+            Button("オープンソースライセンス") {
+                showingLicenses = true
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11))
+            .foregroundColor(.accentColor)
+            .padding(.bottom, 20)
 
             Divider()
 
@@ -58,5 +67,43 @@ struct AboutView: View {
             .keyboardShortcut(.defaultAction)
         }
         .frame(width: 320)
+        .sheet(isPresented: $showingLicenses) {
+            LicensesView()
+        }
+    }
+}
+
+/// 同梱した THIRD_PARTY_LICENSES.txt を表示するシート。
+struct LicensesView: View {
+    @Environment(\.dismiss) var dismiss
+
+    private var licensesText: String {
+        guard let url = Bundle.main.url(forResource: "THIRD_PARTY_LICENSES", withExtension: "txt")
+            ?? Bundle.main.url(forResource: "THIRD_PARTY_LICENSES", withExtension: "txt", subdirectory: "WebAssets"),
+              let text = try? String(contentsOf: url, encoding: .utf8)
+        else { return "ライセンス情報を読み込めませんでした。" }
+        return text
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("オープンソースライセンス")
+                    .font(.system(size: 13, weight: .bold))
+                Spacer()
+                Button("完了") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+            Divider()
+            ScrollView {
+                Text(licensesText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+        }
+        .frame(width: 560, height: 520)
     }
 }
