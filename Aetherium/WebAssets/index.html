@@ -149,6 +149,9 @@ function fillContent(el, mdText) {
   var html = marked.parse(p.md, { gfm: true, breaks: true });
   html = html.replace(/@@M(\d+)@@/g, function (_, i) { return escapeHTML(p.store[+i]); });
   el.innerHTML = html;
+  // 太字補完は KaTeX より先に行う。KaTeXが先だと数式が入った **...** が
+  // テキストノードを分割してしまい、太字を補完できなくなるため。
+  if (html.indexOf("**") >= 0) applyCJKBold(el);
   if (p.store.length) {
     try {
       renderMathInElement(el, {
@@ -157,11 +160,12 @@ function fillContent(el, mdText) {
           { left: "\\[", right: "\\]", display: true },
           { left: "\\(", right: "\\)", display: false }
         ],
-        throwOnError: false
+        throwOnError: false,
+        // 描画失敗時は赤ではなく地味なグレーでソースを表示する（目立たせない）。
+        errorColor: "#888888"
       });
     } catch (e) {}
   }
-  if (html.indexOf("**") >= 0) applyCJKBold(el);
 }
 
 // ===== 吹き出しHTML生成 =====

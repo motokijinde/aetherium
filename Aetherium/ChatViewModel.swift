@@ -51,25 +51,33 @@ struct WebSearchTool: Tool {
 @MainActor
 final class ChatViewModel: ObservableObject {
     @Published var messages: [Message] = []
-    @Published var selectedModel: String = ""
+    @Published var selectedModel: String = "" { didSet { persist(selectedModel, "selectedModel") } }
     @Published var models: [String] = []
     @Published var isInSession = false
     @Published var isGenerating = false
     @Published var isAudioPlaying = false
-    @Published var selectedSpeakerID: Int = 3
+    @Published var selectedSpeakerID: Int = 3 { didSet { persist(selectedSpeakerID, "selectedSpeakerID") } }
     @Published var displaySpeakers: [(id: Int, name: String)] = []
-    @Published var speechSpeed: Double = 1.00
-    @Published var voiceEnabled: Bool = true
+    @Published var speechSpeed: Double = 1.00 { didSet { persist(speechSpeed, "speechSpeed") } }
+    @Published var voiceEnabled: Bool = true { didSet { persist(voiceEnabled, "voiceEnabled") } }
     @Published var isFetching = false
-    @Published var aiProvider: AIProvider = .ollama
+    @Published var aiProvider: AIProvider = .ollama { didSet { persist(aiProvider.rawValue, "aiProvider") } }
     @Published var appleIntelligenceError: String? = nil
-    @Published var webSearchEnabled: Bool = false
-    @Published var searxngURL: String = "http://localhost:8080"
+    @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, "webSearchEnabled") } }
+    @Published var searxngURL: String = ChatViewModel.defaultSearxngURL { didSet { persist(searxngURL, "searxngURL") } }
+    @Published var voicevoxURL: String = ChatViewModel.defaultVoicevoxURL { didSet { persist(voicevoxURL, "voicevoxURL") } }
+    @Published var llmServerURL: String = ChatViewModel.defaultLLMServerURL { didSet { persist(llmServerURL, "llmServerURL") } }
     @Published var contextUsageRatio: Double = 0.0
-    @Published var ollamaContextSize: Int = 4096
+    @Published var ollamaContextSize: Int = 4096 { didSet { persist(ollamaContextSize, "ollamaContextSize") } }
     static let ollamaContextSizeOptions = [2048, 4096, 8192, 16384, 32768, 65536]
+    // サーバー接続先のデフォルト値（いずれもIPv4ループバック直指定で統一）。
+    static let defaultLLMServerURL = "http://127.0.0.1:11434/v1"
+    static let defaultVoicevoxURL = "http://127.0.0.1:50021"
+    static let defaultSearxngURL = "http://127.0.0.1:8080"
     @Published var ollamaToolsSupported: Bool = false
     @Published var ollamaContextUsedTokens: Int = 0
+    /// 現在のコンテキストにやり取りがあるか（Web検索トグルの切替可否に使用）。
+    @Published var contextHasExchange: Bool = false
     private let estimatedContextCharLimit = 8192  // ~4096 tokens * 2 chars/token
     private let searchResultsCollector = SearchResultsCollector()
     private var ollamaContextStartIndex: Int = 0
@@ -80,6 +88,8 @@ final class ChatViewModel: ObservableObject {
     private var streamTask: URLSessionTask?
     private nonisolated(unsafe) var playbackStateObserver: NSObjectProtocol?
     private var foundationSession: LanguageModelSession?
+    /// 設定の読み込みが終わるまで didSet での保存を抑止するフラグ。
+    private var settingsLoaded = false
 
     var currentSpeakerName: String { displaySpeakers.first(where: { $0.id == selectedSpeakerID })?.name ?? "AI" }
 
@@ -88,18 +98,24 @@ final class ChatViewModel: ObservableObject {
     }
 
     var canStartSession: Bool {
-        let voiceReady = !voiceEnabled || !displaySpeakers.isEmpty
+        // VOICEVOX は開始条件に含めない（未起動でも開始でき、音声は使うときだけ動く）。
         if aiProvider == .appleIntelligence {
-            return appleIntelligenceError == nil && voiceReady
+            return appleIntelligenceError == nil
         } else {
-            return !models.isEmpty && voiceReady
+            return !models.isEmpty
         }
     }
 
-    let llmServerURL = "http://127.0.0.1:11434/v1"
-    let voicevoxURL = "http://127.0.0.1:50021"
+    /// Web検索トグルを切り替えられるか。コンテキストが空（開始前 or クリア直後）のときだけ可。
+    /// Ollama はツール対応モデルのときのみ。
+    var canToggleWebSearch: Bool {
+        guard !contextHasExchange else { return false }
+        return aiProvider == .appleIntelligence ? true : ollamaToolsSupported
+    }
 
     init() {
+        loadPersistedSettings()
+        settingsLoaded = true
         playbackStateObserver = NotificationCenter.default.addObserver(
             forName: .playerManagerPlaybackStateChanged,
             object: PlayerManager.shared,
@@ -118,6 +134,27 @@ final class ChatViewModel: ObservableObject {
         if let observer = playbackStateObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+    }
+
+    // MARK: - 設定の永続化
+
+    private func persist<T>(_ value: T, _ key: String) {
+        guard settingsLoaded else { return }  // 読み込み中の didSet は無視
+        UserDefaults.standard.set(value, forKey: "aetherium.\(key)")
+    }
+
+    private func loadPersistedSettings() {
+        let d = UserDefaults.standard
+        if let v = d.string(forKey: "aetherium.selectedModel") { selectedModel = v }
+        if d.object(forKey: "aetherium.selectedSpeakerID") != nil { selectedSpeakerID = d.integer(forKey: "aetherium.selectedSpeakerID") }
+        if d.object(forKey: "aetherium.speechSpeed") != nil { speechSpeed = d.double(forKey: "aetherium.speechSpeed") }
+        if d.object(forKey: "aetherium.voiceEnabled") != nil { voiceEnabled = d.bool(forKey: "aetherium.voiceEnabled") }
+        if let v = d.string(forKey: "aetherium.aiProvider"), let p = AIProvider(rawValue: v) { aiProvider = p }
+        if d.object(forKey: "aetherium.webSearchEnabled") != nil { webSearchEnabled = d.bool(forKey: "aetherium.webSearchEnabled") }
+        if let v = d.string(forKey: "aetherium.searxngURL"), !v.isEmpty { searxngURL = v }
+        if let v = d.string(forKey: "aetherium.voicevoxURL"), !v.isEmpty { voicevoxURL = v }
+        if let v = d.string(forKey: "aetherium.llmServerURL"), !v.isEmpty { llmServerURL = v }
+        if d.object(forKey: "aetherium.ollamaContextSize") != nil { ollamaContextSize = d.integer(forKey: "aetherium.ollamaContextSize") }
     }
 
     // MARK: - Context usage tracking
@@ -176,6 +213,7 @@ final class ChatViewModel: ObservableObject {
 
     func clearContext() {
         stopGeneration()
+        contextHasExchange = false  // クリア直後はWeb検索トグルを再び切替可能にする
         if aiProvider == .appleIntelligence {
             foundationSession = makeSession()
         } else {
@@ -270,6 +308,14 @@ final class ChatViewModel: ObservableObject {
         isFetching = false
     }
 
+    /// サーバー接続先URLをすべてデフォルトに戻して再取得する。
+    func resetServerURLsToDefaults() {
+        llmServerURL = Self.defaultLLMServerURL
+        voicevoxURL = Self.defaultVoicevoxURL
+        searxngURL = Self.defaultSearxngURL
+        Task { await fetchAll() }
+    }
+
     func fetchModels() async {
         guard let url = URL(string: "\(llmServerURL)/models") else { return }
         do {
@@ -278,7 +324,10 @@ final class ChatViewModel: ObservableObject {
                let dataArray = json["data"] as? [[String: Any]] {
                 let fetchedModels = dataArray.compactMap { $0["id"] as? String }
                 self.models = fetchedModels
-                if self.selectedModel.isEmpty { self.selectedModel = fetchedModels.first ?? "" }
+                // 記憶したモデルが現在の一覧に無ければ先頭にフォールバック（設定変更でモデルが消えた場合の対策）。
+                if !fetchedModels.contains(self.selectedModel) {
+                    self.selectedModel = fetchedModels.first ?? ""
+                }
             }
         } catch {
             print("LLM Server not found")
@@ -323,6 +372,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     func sendMessage(_ text: String) {
+        contextHasExchange = true  // 会話が始まったらWeb検索トグルを固定する
         if aiProvider == .appleIntelligence {
             sendMessageApple(text)
         } else {
@@ -787,6 +837,7 @@ final class ChatViewModel: ObservableObject {
         stopGeneration()
         messages = []
         isInSession = false
+        contextHasExchange = false
         ollamaContextStartIndex = 0
         ollamaContextUsedTokens = 0
         contextUsageRatio = 0.0

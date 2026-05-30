@@ -81,7 +81,7 @@ struct MultilineInputField: NSViewRepresentable {
 }
 
 struct AetheriumView: View {
-    @StateObject private var vm = ChatViewModel()
+    @EnvironmentObject var vm: ChatViewModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var inputText = ""
     @State private var rotationAngle: Double = 0
@@ -93,6 +93,13 @@ struct AetheriumView: View {
             inputText = ""
             vm.sendMessage(t)
         }
+    }
+
+    /// 🔍 トグルのツールチップ（無効理由を説明）。
+    private var webSearchHelp: String {
+        if vm.contextHasExchange { return "会話中は変更できません。コンテキストをクリアすると変更できます" }
+        if vm.aiProvider == .ollama && !vm.ollamaToolsSupported { return "このモデルはツール呼び出し非対応です" }
+        return vm.webSearchEnabled ? "Web検索 (SearXNG): ON" : "Web検索 (SearXNG): OFF"
     }
 
     var body: some View {
@@ -123,11 +130,28 @@ struct AetheriumView: View {
                                 }
                             }
                             if vm.aiProvider == .ollama {
-                                settingRow(title: "Model", icon: "cpu", content: $vm.selectedModel, options: vm.models, placeholder: "LLMを起動してください")
-                                    .onChange(of: vm.selectedModel) { _, newModel in
-                                        guard !newModel.isEmpty else { return }
-                                        Task { await vm.fetchModelInfo(for: newModel) }
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("Model", systemImage: "cpu").font(.subheadline).bold()
+                                    HStack(spacing: 8) {
+                                        if vm.models.isEmpty {
+                                            Text("LLMを起動してください").font(.caption).foregroundColor(.red)
+                                        } else {
+                                            Picker("", selection: $vm.selectedModel) {
+                                                ForEach(vm.models, id: \.self) { Text($0).tag($0) }
+                                            }
+                                            .pickerStyle(.menu).labelsHidden()
+                                        }
+                                        Button { Task { await vm.fetchModels() } } label: {
+                                            Image(systemName: "arrow.clockwise")
+                                        }
+                                        .buttonStyle(.plain).disabled(vm.isFetching).help("モデルを再取得")
+                                        Spacer()
                                     }
+                                }
+                                .onChange(of: vm.selectedModel) { _, newModel in
+                                    guard !newModel.isEmpty else { return }
+                                    Task { await vm.fetchModelInfo(for: newModel) }
+                                }
                                 VStack(alignment: .leading, spacing: 8) {
                                     let sizes = ChatViewModel.ollamaContextSizeOptions
                                     Label("Context Size: \(contextSizeLabel(vm.ollamaContextSize))", systemImage: "memorychip").font(.subheadline).bold()
@@ -140,22 +164,6 @@ struct AetheriumView: View {
                                         step: 1
                                     )
                                 }
-                                VStack(alignment: .leading, spacing: 8) {
-                                    if vm.ollamaToolsSupported {
-                                        Toggle(isOn: $vm.webSearchEnabled) {
-                                            Label("Web検索 (SearXNG)", systemImage: "magnifyingglass").font(.subheadline).bold()
-                                        }
-                                        .toggleStyle(.switch)
-                                        if vm.webSearchEnabled {
-                                            TextField("SearXNG URL", text: $vm.searxngURL)
-                                                .textFieldStyle(.roundedBorder)
-                                                .font(.caption)
-                                        }
-                                    } else if !vm.models.isEmpty {
-                                        Label("Web検索 (SearXNG)", systemImage: "magnifyingglass").font(.subheadline).bold()
-                                        Text("このモデルはツール呼び出し非対応").font(.caption).foregroundColor(.secondary)
-                                    }
-                                }
                             } else {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Label("Apple Intelligence", systemImage: "apple.intelligence").font(.subheadline).bold()
@@ -164,36 +172,11 @@ struct AetheriumView: View {
                                     } else {
                                         Text("オンデバイス AI が利用可能です").font(.caption).foregroundColor(.green)
                                     }
-                                    Toggle(isOn: $vm.webSearchEnabled) {
-                                        Label("Web検索 (SearXNG)", systemImage: "magnifyingglass")
-                                            .font(.caption)
-                                    }
-                                    .toggleStyle(.switch)
-                                    .disabled(vm.appleIntelligenceError != nil)
-                                    .onChange(of: vm.webSearchEnabled) { _, _ in
-                                        vm.setupFoundationSession()
-                                    }
-                                    if vm.webSearchEnabled {
-                                        TextField("SearXNG URL", text: $vm.searxngURL)
-                                            .textFieldStyle(.roundedBorder)
-                                            .font(.caption)
-                                            .onSubmit { vm.setupFoundationSession() }
-                                    }
                                 }
                             }
-                            VStack(alignment: .leading, spacing: 8) {
-                                Toggle(isOn: $vm.voiceEnabled) {
-                                    Label("音声読み上げ (VOICEVOX)", systemImage: "speaker.wave.2.fill").font(.subheadline).bold()
-                                }
-                                .toggleStyle(.switch)
-                            }
-                            if vm.voiceEnabled {
-                                settingRow(title: "Voice", icon: "mouth", selection: $vm.selectedSpeakerID, options: vm.displaySpeakers, placeholder: "VOICEVOXを起動してください")
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Label("Speed: \(String(format: "%.2f", vm.speechSpeed))x", systemImage: "speedometer").font(.subheadline).bold()
-                                    Slider(value: $vm.speechSpeed, in: 0.5...2.0)
-                                }
-                            }
+                            // 音声・Web検索・各URLは「設定(⌘,)」と入力欄に移動した。
+                            Text("音声/Web検索はチャットの入力欄、接続先URLや話者は「設定(⌘,)」で変更できます。")
+                                .font(.caption2).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                         }.padding(30).background(.thinMaterial).cornerRadius(24).frame(width: 380)
 
                         VStack(spacing: 12) {
@@ -205,7 +188,7 @@ struct AetheriumView: View {
                             .clipShape(Capsule())
                             .disabled(!vm.canStartSession)
 
-                            if (vm.aiProvider == .ollama && vm.models.isEmpty) || (vm.voiceEnabled && vm.displaySpeakers.isEmpty) {
+                            if vm.aiProvider == .ollama && vm.models.isEmpty {
                                 Button(action: { Task { await vm.fetchAll() } }) {
                                     Label(vm.isFetching ? "接続中..." : "再接続", systemImage: "arrow.clockwise")
                                 }
@@ -215,7 +198,11 @@ struct AetheriumView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .task { await vm.fetchAll() }
+                    .task {
+                        await vm.fetchAll()
+                        // 起動時にApple Intelligenceが復元されていたらセッションを初期化する。
+                        if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
+                    }
                 } else {
                     VStack(spacing: 0) {
                         // 会話全体を1個のWebViewで描画し、スクロールはWebView内部に任せる
@@ -227,28 +214,53 @@ struct AetheriumView: View {
                             speakerName: vm.currentSpeakerName
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        HStack(spacing: 12) {
+                        VStack(spacing: 8) {
                             MultilineInputField(text: $inputText, height: $inputHeight, onSubmit: { submitInput() })
                                 .frame(height: inputHeight)
-                                .padding(.horizontal, 8)
-                                .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.primary.opacity(0.05)))
-                            if vm.isGenerating || vm.isAudioPlaying {
-                                Button(action: { vm.stopGeneration() }) {
-                                    Image(systemName: "stop.circle.fill")
-                                        .font(.system(size: 32))
-                                        .foregroundStyle(Color.red.gradient)
+                            HStack(spacing: 16) {
+                                // 🔍 Web検索トグル（コンテキストが空のときだけ切替可）
+                                Button {
+                                    vm.webSearchEnabled.toggle()
+                                    if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
+                                } label: {
+                                    Image(systemName: "globe")
+                                        .font(.system(size: 16))
+                                        .foregroundStyle(vm.webSearchEnabled ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color.secondary))
                                 }
                                 .buttonStyle(.plain)
-                            } else {
-                                Button(action: { submitInput() }) {
-                                    Image(systemName: "arrow.up.circle.fill")
-                                        .font(.system(size: 32))
-                                        .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? AnyShapeStyle(Color.gray) : AnyShapeStyle(Color.blue.gradient))
+                                .disabled(!vm.canToggleWebSearch)
+                                .help(webSearchHelp)
+                                // 🔊 音声読み上げトグル（常時切替可）
+                                Button { vm.voiceEnabled.toggle() } label: {
+                                    Image(systemName: vm.voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                                        .font(.system(size: 16))
+                                        .foregroundStyle(vm.voiceEnabled ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color.secondary))
                                 }
                                 .buttonStyle(.plain)
-                                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .help(vm.voiceEnabled ? "音声読み上げ: ON" : "音声読み上げ: OFF")
+                                Spacer()
+                                if vm.isGenerating || vm.isAudioPlaying {
+                                    Button(action: { vm.stopGeneration() }) {
+                                        Image(systemName: "stop.circle.fill")
+                                            .font(.system(size: 30))
+                                            .foregroundStyle(Color.red.gradient)
+                                    }
+                                    .buttonStyle(.plain)
+                                } else {
+                                    Button(action: { submitInput() }) {
+                                        Image(systemName: "arrow.up.circle.fill")
+                                            .font(.system(size: 30))
+                                            .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? AnyShapeStyle(Color.gray) : AnyShapeStyle(Color.blue.gradient))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                }
                             }
-                        }.padding(.horizontal, 16).padding(.vertical, 12).background(.ultraThinMaterial)
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color.primary.opacity(0.06)))
+                        .padding(.horizontal, 16).padding(.vertical, 12)
+                        .background(.ultraThinMaterial)
                     }
                     .toolbar {
                         ToolbarItemGroup(placement: .primaryAction) {
@@ -303,15 +315,6 @@ struct AetheriumView: View {
         .frame(minWidth: 600, minHeight: 700)
     }
 
-    private func settingRow(title: String, icon: String, content: Binding<String>, options: [String], placeholder: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(title, systemImage: icon).font(.subheadline).bold()
-            if options.isEmpty { Text(placeholder).font(.caption).foregroundColor(.red) } else {
-                Picker("", selection: content) { ForEach(options, id: \.self) { Text($0).tag($0) } }.pickerStyle(.menu).labelsHidden()
-            }
-        }
-    }
-
     private func contextIndicatorColor(_ ratio: Double) -> Color {
         if ratio < 0.6 { return .blue }
         if ratio < 0.8 { return .orange }
@@ -323,14 +326,4 @@ struct AetheriumView: View {
         return "\(k)K"
     }
 
-
-
-    private func settingRow(title: String, icon: String, selection: Binding<Int>, options: [(id: Int, name: String)], placeholder: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(title, systemImage: icon).font(.subheadline).bold()
-            if options.isEmpty { Text(placeholder).font(.caption).foregroundColor(.red) } else {
-                Picker("", selection: selection) { ForEach(options, id: \.id) { Text($0.name).tag($0.id) } }.pickerStyle(.menu).labelsHidden()
-            }
-        }
-    }
 }
