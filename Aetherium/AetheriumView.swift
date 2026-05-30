@@ -1,170 +1,6 @@
 import SwiftUI
 import AppKit
 
-struct MessageBubble: View {
-    let message: Message
-    let speakerName: String
-    let isLoadingActive: Bool
-    let maxContentWidth: CGFloat
-    var isUser: Bool { message.role == "user" }
-    @Environment(\.colorScheme) private var colorScheme
-    @State private var dotOpacity: [Double] = [1.0, 0.6, 0.6]
-    @State private var hoveredStatIndex: Int? = nil
-    @State private var webSize: CGSize = .zero
-    var body: some View {
-        if message.role == "system" {
-            HStack(spacing: 8) {
-                Rectangle().frame(height: 0.5).foregroundColor(.secondary.opacity(0.3))
-                Text(message.content).font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1).fixedSize()
-                Rectangle().frame(height: 0.5).foregroundColor(.secondary.opacity(0.3))
-            }
-            .padding(.horizontal, 24).padding(.vertical, 4)
-        } else {
-        HStack(alignment: .bottom, spacing: 10) {
-            if !isUser { Image(systemName: "waveform.circle.fill").font(.system(size: 32)).foregroundStyle(Color.green.gradient).padding(.bottom, 2) } else { Spacer() }
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-                Text(isUser ? "あなた" : speakerName).font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-                VStack(alignment: .leading, spacing: 4) {
-                    if message.content.isEmpty && isLoadingActive && !isUser {
-                        HStack(spacing: 3) {
-                            ForEach(0..<3, id: \.self) { index in
-                                Circle().fill(Color.blue).frame(width: 6, height: 6)
-                                    .opacity(dotOpacity[index])
-                            }
-                        }.padding(.horizontal, 14).padding(.vertical, 10).onAppear {
-                            withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { dotOpacity[0] = 0.3 }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { dotOpacity[1] = 0.3 }
-                            }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                                withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { dotOpacity[2] = 0.3 }
-                            }
-                        }
-                    } else {
-                        // 全メッセージ(ユーザー/アシスタント/生成中)を同じ KaTeX+marked の WebView で描画し、
-                        // 描画エンジン差による見た目のブレをなくす。青背景のユーザー吹き出しは白文字にする。
-                        MathMarkdownView(content: message.content, dark: isUser ? true : (colorScheme == .dark), maxWidth: maxContentWidth, size: $webSize)
-                            .frame(width: webSize.width > 0 ? webSize.width : nil, height: max(webSize.height, 1))
-                            .padding(.horizontal, 14).padding(.vertical, 10).background(isUser ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(Color.gray.opacity(0.15).gradient)).foregroundColor(isUser ? .white : .primary).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    }
-                    if let sources = message.searchSources, !sources.isEmpty, !isUser {
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 3) {
-                                Image(systemName: "globe.asia.australia").font(.system(size: 7))
-                                Text("Web検索 \(sources.count)件").font(.system(size: 8, weight: .bold))
-                            }
-                            .foregroundColor(.secondary)
-                            ForEach(sources) { source in
-                                Link(destination: URL(string: source.url) ?? URL(string: "https://example.com")!) {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "link").font(.system(size: 7)).foregroundColor(.blue)
-                                        Text(source.title).font(.system(size: 8)).lineLimit(1).foregroundColor(.primary)
-                                        Spacer(minLength: 0)
-                                        Text(URL(string: source.url)?.host ?? "").font(.system(size: 7, design: .monospaced)).foregroundColor(.secondary).lineLimit(1)
-                                    }
-                                    .padding(.horizontal, 8).padding(.vertical, 3)
-                                    .background(Color.blue.opacity(0.06))
-                                    .cornerRadius(6)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.leading, 4)
-                    }
-                    if let stats = message.stats, !isUser, !message.content.isEmpty {
-                        HStack(spacing: 3) {
-                            HStack(spacing: 2) {
-                                Image(systemName: "bolt.fill").font(.system(size: 7))
-                                Text(String(format: "%.1f t/s", stats.tokensPerSecond ?? 0)).font(.system(size: 8, design: .monospaced))
-                            }
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 4)
-                            .background(Color.secondary.opacity(0.1))
-                            .cornerRadius(6)
-                            .onHover { hovering in
-                                hoveredStatIndex = hovering ? 0 : nil
-                            }
-                            .overlay(alignment: .bottom) {
-                                if hoveredStatIndex == 0 {
-                                    Text("トークン生成速度")
-                                        .font(.system(size: 9))
-                                        .foregroundColor(.white)
-                                        .lineLimit(nil)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(Color.black.opacity(0.8))
-                                        .cornerRadius(4)
-                                        .offset(y: 28)
-                                        .zIndex(1)
-                                }
-                            }
-
-                            HStack(spacing: 2) {
-                                Image(systemName: "tag").font(.system(size: 7))
-                                Text(String(format: "%d tokens", stats.completionTokens)).font(.system(size: 8, design: .monospaced))
-                            }
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 4)
-                            .background(Color.secondary.opacity(0.1))
-                            .cornerRadius(6)
-                            .onHover { hovering in
-                                hoveredStatIndex = hovering ? 1 : nil
-                            }
-                            .overlay(alignment: .bottom) {
-                                if hoveredStatIndex == 1 {
-                                    Text("生成トークン数")
-                                        .font(.system(size: 9))
-                                        .foregroundColor(.white)
-                                        .lineLimit(nil)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(Color.black.opacity(0.8))
-                                        .cornerRadius(4)
-                                        .offset(y: 28)
-                                        .zIndex(1)
-                                }
-                            }
-
-                            HStack(spacing: 2) {
-                                Image(systemName: "clock").font(.system(size: 7))
-                                Text(String(format: "%.1f second", stats.ttft ?? 0)).font(.system(size: 8, design: .monospaced))
-                            }
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 4)
-                            .background(Color.secondary.opacity(0.1))
-                            .cornerRadius(6)
-                            .onHover { hovering in
-                                hoveredStatIndex = hovering ? 2 : nil
-                            }
-                            .overlay(alignment: .bottom) {
-                                if hoveredStatIndex == 2 {
-                                    Text("最初のトークンまでの時間")
-                                        .font(.system(size: 9))
-                                        .foregroundColor(.white)
-                                        .lineLimit(nil)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(Color.black.opacity(0.8))
-                                        .cornerRadius(4)
-                                        .offset(y: 28)
-                                        .zIndex(1)
-                                }
-                            }
-                        }
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 4)
-                    }
-                }
-            }
-            if isUser { Image(systemName: "person.crop.circle.fill").font(.system(size: 32)).foregroundStyle(Color.blue.gradient).padding(.bottom, 2) } else { Spacer() }
-        }.padding(.horizontal, 16).padding(.vertical, 8)
-        } // end else (non-system message)
-    }
-}
-
 // 複数行入力欄（NSTextView ラッパー）
 // Enter で送信、Shift+Enter で改行。改行はそのまま text に保持される。
 // 入力内容に応じて高さが 1〜5 行の範囲で自動伸縮し、5行を超えるとスクロールする。
@@ -244,33 +80,12 @@ struct MultilineInputField: NSViewRepresentable {
     }
 }
 
-/// スクロール追従の状態。@State(値型)ではなく参照型で保持することで、
-/// 高頻度なスクロール監視で値を更新してもビューの再描画を起こさない（＝軽い）。
-private final class ScrollTracker {
-    var lastHeight: CGFloat = 0
-    var autoFollow = true
-}
-
-/// スクロール監視で必要な幾何情報。Equatable にして変化時のみ action を呼ぶ。
-private struct ScrollState: Equatable {
-    var contentHeight: CGFloat
-    var offsetY: CGFloat
-    var containerHeight: CGFloat
-}
-
 struct AetheriumView: View {
     @StateObject private var vm = ChatViewModel()
+    @Environment(\.colorScheme) private var colorScheme
     @State private var inputText = ""
     @State private var rotationAngle: Double = 0
     @State private var inputHeight: CGFloat = 38
-    @State private var tracker = ScrollTracker()
-    @State private var chatWidth: CGFloat = 600
-
-    /// チャット領域の幅から、吹き出しの最大幅を算出する。
-    /// アイコン・余白を差し引いた使える幅を使い、最小440px・最大720pxにクランプする。
-    private var maxBubbleWidth: CGFloat {
-        min(720, max(440, chatWidth - 140))
-    }
 
     private func submitInput() {
         let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -403,40 +218,15 @@ struct AetheriumView: View {
                     .task { await vm.fetchAll() }
                 } else {
                     VStack(spacing: 0) {
-                        ScrollViewReader { proxy in
-                            ScrollView {
-                                LazyVStack(spacing: 0) { ForEach(vm.messages, id: \.id) { msg in let isLastMsg = (msg.id == vm.messages.last?.id); let isLoadingActive = isLastMsg && msg.role == "assistant" && vm.isGenerating; MessageBubble(message: msg, speakerName: vm.currentSpeakerName, isLoadingActive: isLoadingActive, maxContentWidth: maxBubbleWidth) } }.padding(.vertical, 10)
-                                Spacer().id("bottom")
-                            }
-                            // 本文が伸びた(テキスト変化・WebViewの非同期な高さ報告)ときだけ下端へ追従する。
-                            // 状態は参照型(tracker)で持つのでこの監視では再描画が起きず軽い。アニメも付けない
-                            // ため、毎トークンのアニメ積み重ねによる固まりも起きない。
-                            .onScrollGeometryChange(for: ScrollState.self) { geo in
-                                ScrollState(contentHeight: geo.contentSize.height,
-                                            offsetY: geo.contentOffset.y,
-                                            containerHeight: geo.containerSize.height)
-                            } action: { _, s in
-                                if s.contentHeight > tracker.lastHeight + 0.5 {
-                                    // 内容が伸びた → 追従中なら下端へ。上を見てる間(autoFollow=false)は何もしない。
-                                    if tracker.autoFollow { proxy.scrollTo("bottom", anchor: .bottom) }
-                                } else {
-                                    // 高さ不変＝スクロール操作。下端付近かどうかで追従ON/OFFを切替（ユーザー操作を尊重）。
-                                    tracker.autoFollow = (s.contentHeight - s.offsetY - s.containerHeight) < 60
-                                }
-                                tracker.lastHeight = s.contentHeight
-                            }
-                            // チャット領域の幅を監視し、吹き出しの最大幅を追従させる（リサイズ時のみ発火）。
-                            .onScrollGeometryChange(for: CGFloat.self) { geo in
-                                geo.containerSize.width
-                            } action: { _, width in
-                                chatWidth = width
-                            }
-                            // 送信時は確実に下端まで追従させる。
-                            .onChange(of: vm.messages.count) { _, _ in
-                                tracker.autoFollow = true
-                                proxy.scrollTo("bottom", anchor: .bottom)
-                            }
-                        }
+                        // 会話全体を1個のWebViewで描画し、スクロールはWebView内部に任せる
+                        // （メッセージ毎にWebViewを並べる方式の重さ・スクロール相性問題を回避）。
+                        ConversationWebView(
+                            messages: vm.messages,
+                            dark: colorScheme == .dark,
+                            isGenerating: vm.isGenerating,
+                            speakerName: vm.currentSpeakerName
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         HStack(spacing: 12) {
                             MultilineInputField(text: $inputText, height: $inputHeight, onSubmit: { submitInput() })
                                 .frame(height: inputHeight)

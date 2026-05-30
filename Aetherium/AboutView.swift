@@ -49,7 +49,7 @@ struct AboutView: View {
             }
             .padding(.top, 20)
 
-            Button("オープンソースライセンス") {
+            Button("Open Source Licenses") {
                 showingLicenses = true
             }
             .buttonStyle(.plain)
@@ -73,13 +73,13 @@ struct AboutView: View {
     }
 }
 
-/// 同梱した THIRD_PARTY_LICENSES.txt を表示するシート。
+/// 同梱した THIRD_PARTY_LICENSES（拡張子なし）を表示するシート。
 struct LicensesView: View {
     @Environment(\.dismiss) var dismiss
 
     private var licensesText: String {
-        guard let url = Bundle.main.url(forResource: "THIRD_PARTY_LICENSES", withExtension: "txt")
-            ?? Bundle.main.url(forResource: "THIRD_PARTY_LICENSES", withExtension: "txt", subdirectory: "WebAssets"),
+        guard let url = Bundle.main.url(forResource: "THIRD_PARTY_LICENSES", withExtension: nil)
+            ?? Bundle.main.url(forResource: "THIRD_PARTY_LICENSES", withExtension: nil, subdirectory: "WebAssets"),
               let text = try? String(contentsOf: url, encoding: .utf8)
         else { return "ライセンス情報を読み込めませんでした。" }
         return text
@@ -88,7 +88,7 @@ struct LicensesView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("オープンソースライセンス")
+                Text("Open Source Licenses")
                     .font(.system(size: 13, weight: .bold))
                 Spacer()
                 Button("完了") { dismiss() }

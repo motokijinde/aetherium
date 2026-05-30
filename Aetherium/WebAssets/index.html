@@ -16,72 +16,106 @@
     line-height: 1.55;
     color: #1d1d1f;
     -webkit-text-size-adjust: 100%;
-    overflow-wrap: anywhere;
-    word-break: break-word;
   }
   body.dark { color: #f5f5f7; }
-  /* 内容の自然な幅(=折り返さない最長行)を基準に吹き出しをフィットさせる。
-     width:max-content は親の幅に依存しないため、幅が縮み続ける負のループを防げる。
-     max-width はウィンドウ最小幅(600)でもはみ出さない安全値。 */
-  #content { display: inline-block; width: max-content; max-width: 440px; }
-  #content > :first-child { margin-top: 0; }
-  #content > :last-child { margin-bottom: 0; }
-  p { margin: 0 0 0.5em; }
-  pre {
+
+  #conversation { padding: 10px 16px 14px; }
+
+  /* ===== 吹き出しレイアウト ===== */
+  .msg { display: flex; flex-direction: column; padding: 8px 0; }
+  .msg.assistant { align-items: flex-start; }
+  .msg.user { align-items: flex-end; }
+  /* アバター＋本文の行。アバターは吹き出しの下端に揃える（統計・ソースには引っ張られない）。 */
+  .row { display: flex; align-items: flex-end; gap: 10px; max-width: 100%; }
+  .msg.user .row { flex-direction: row-reverse; }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 50%; flex: 0 0 32px;
+    background-position: center; background-size: cover; background-repeat: no-repeat;
+  }
+  /* アバター画像。WebAssets の avatar-*.png を同名で差し替えれば本番画像になる。 */
+  .msg.assistant .avatar { background-color: #34c759; background-image: url("avatar-assistant.png"); }
+  .msg.user .avatar { background-color: #0a84ff; background-image: url("avatar-user.png"); }
+
+  .main { display: flex; flex-direction: column; gap: 4px; max-width: min(720px, 78vw); min-width: 0; }
+  .msg.user .main { align-items: flex-end; }
+  .label { font-size: 10px; font-weight: 700; color: #8e8e93; }
+  /* 統計・ソースは行の外。アバター幅(32)+間隔(10)分インデントして吹き出し左端に揃える。 */
+  .extras { padding-left: 42px; }
+
+  .bubble {
+    /* 中身の幅に合わせる（ラベル幅へ引き伸ばされない）。長文は最大幅で折り返す。ユーザー・アシスタント共通。 */
+    width: max-content; max-width: min(720px, 78vw);
+    padding: 10px 14px; border-radius: 16px;
     background: rgba(127,127,127,0.15);
-    padding: 8px 10px;
-    border-radius: 8px;
-    overflow-x: auto;
+    overflow-wrap: anywhere; word-break: break-word;
   }
+  .msg.user .bubble { background: linear-gradient(135deg, #0a84ff, #0060df); color: #fff; }
+  .bubble > :first-child { margin-top: 0; }
+  .bubble > :last-child { margin-bottom: 0; }
+
+  /* ===== Markdown 要素 ===== */
+  p { margin: 0 0 0.5em; }
+  pre { background: rgba(0,0,0,0.18); padding: 8px 10px; border-radius: 8px; overflow-x: auto; }
   code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.9em; }
-  :not(pre) > code {
-    background: rgba(127,127,127,0.18);
-    padding: 1px 4px;
-    border-radius: 4px;
-  }
+  :not(pre) > code { background: rgba(127,127,127,0.2); padding: 1px 4px; border-radius: 4px; }
   pre code { background: none; padding: 0; }
   ul, ol { margin: 0.3em 0; padding-left: 1.4em; }
   li { margin: 2px 0; }
   a { color: #0a84ff; text-decoration: none; }
+  .msg.user a { color: #fff; text-decoration: underline; }
   a:hover { text-decoration: underline; }
   table { border-collapse: collapse; margin: 0.4em 0; }
   th, td { border: 1px solid rgba(127,127,127,0.4); padding: 3px 8px; }
-  blockquote {
-    margin: 0.3em 0;
-    padding-left: 10px;
-    border-left: 3px solid rgba(127,127,127,0.4);
-  }
+  blockquote { margin: 0.3em 0; padding-left: 10px; border-left: 3px solid rgba(127,127,127,0.4); }
   hr { border: none; border-top: 1px solid rgba(127,127,127,0.3); margin: 0.6em 0; }
   img { max-width: 100%; }
   .katex-display { margin: 0.4em 0; overflow-x: auto; overflow-y: hidden; }
+
+  /* ===== ローディングドット ===== */
+  .dots { display: flex; gap: 4px; padding: 3px 0; }
+  .dots span { width: 6px; height: 6px; border-radius: 50%; background: #0a84ff; animation: blink 1.2s infinite; }
+  .dots span:nth-child(2) { animation-delay: 0.2s; }
+  .dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  /* ===== 統計チップ ===== */
+  .stats { display: flex; gap: 4px; margin-top: 2px; flex-wrap: wrap; }
+  .chip {
+    font-size: 8px; font-family: ui-monospace, Menlo, monospace; color: #8e8e93;
+    background: rgba(127,127,127,0.12); padding: 3px 6px; border-radius: 6px; white-space: nowrap;
+  }
+
+  /* ===== 検索ソース ===== */
+  .sources { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
+  .sources-h { font-size: 8px; font-weight: 700; color: #8e8e93; }
+  .source {
+    display: flex; gap: 6px; align-items: center; font-size: 8px;
+    background: rgba(10,132,255,0.06); padding: 3px 8px; border-radius: 6px; color: inherit;
+  }
+  .src-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .src-host { color: #8e8e93; font-family: ui-monospace, Menlo, monospace; white-space: nowrap; }
+
+  /* ===== システムメッセージ ===== */
+  .system { display: flex; align-items: center; gap: 8px; justify-content: center; padding: 4px 24px; }
+  .system .line { flex: 1; height: 0.5px; background: rgba(127,127,127,0.3); }
+  .system .txt { font-size: 10px; color: #8e8e93; white-space: nowrap; }
 </style>
 </head>
 <body>
-<div id="content"></div>
+<div id="conversation"></div>
 <script>
-function postSize() {
-  var el = document.getElementById("content");
-  var rect = el.getBoundingClientRect();
-  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.size) {
-    window.webkit.messageHandlers.size.postMessage({
-      w: Math.ceil(rect.width),
-      h: Math.ceil(rect.height)
-    });
-  }
-}
-
-function escapeHTML(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+// ===== 共通ユーティリティ =====
+function decodeB64(b64) { return decodeURIComponent(escape(atob(b64))); }
+function escapeHTML(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function escapeAttr(s) { return escapeHTML(s).replace(/"/g, "&quot;"); }
 
 // Markdown より先に数式を退避し、marked による誤変換（$H_1$ の _ が斜体化する等）を防ぐ。
 function protectMath(md) {
   var store = [];
-  function ph(raw) { store.push(raw); return "" + (store.length - 1) + ""; }
+  function ph(raw) { store.push(raw); return "@@M" + (store.length - 1) + "@@"; }
   md = md.replace(/\$\$([\s\S]+?)\$\$/g, function (m) { return ph(m); });
   md = md.replace(/\\\[([\s\S]+?)\\\]/g, function (m) { return ph(m); });
   md = md.replace(/\\\(([\s\S]+?)\\\)/g, function (m) { return ph(m); });
-  // $ ... $（インライン）。通貨表記（"$5 to $10" 等）は数式扱いしない。
   md = md.replace(/(?<![\\$])\$([^$\n]+?)(?<![\\\s])\$(?!\d)/g, function (m, inner) {
     var t = inner.trim();
     if (/^\d/.test(t) && /\s/.test(inner) && inner.indexOf("\\") < 0) return m;
@@ -90,48 +124,31 @@ function protectMath(md) {
   return { md: md, store: store };
 }
 
-function setMaxWidth(w) {
-  document.getElementById("content").style.maxWidth = w + "px";
-  postSize();
-}
-
-// marked が CJK 約物隣接の **太字** を処理できず素の "**...**" が残ることがあるため、
-// 残ったものだけを後処理で <strong> 化する。コード/数式の中は対象外。
+// marked が CJK 約物隣接の **太字** を処理できず残った "**...**" を <strong> 化する。
 function applyCJKBold(root) {
   var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-  var targets = [];
-  var node;
+  var targets = [], node;
   while ((node = walker.nextNode())) {
     if (node.parentElement && node.parentElement.closest("code, pre, .katex")) continue;
     if (/\*\*[^*\n]+?\*\*/.test(node.nodeValue)) targets.push(node);
   }
-  targets.forEach(function (textNode) {
+  targets.forEach(function (tn) {
     var frag = document.createDocumentFragment();
-    textNode.nodeValue.split(/(\*\*[^*\n]+?\*\*)/g).forEach(function (part) {
+    tn.nodeValue.split(/(\*\*[^*\n]+?\*\*)/g).forEach(function (part) {
       var m = part.match(/^\*\*([^*\n]+?)\*\*$/);
-      if (m) {
-        var strong = document.createElement("strong");
-        strong.textContent = m[1];
-        frag.appendChild(strong);
-      } else if (part) {
-        frag.appendChild(document.createTextNode(part));
-      }
+      if (m) { var st = document.createElement("strong"); st.textContent = m[1]; frag.appendChild(st); }
+      else if (part) frag.appendChild(document.createTextNode(part));
     });
-    textNode.parentNode.replaceChild(frag, textNode);
+    tn.parentNode.replaceChild(frag, tn);
   });
 }
 
-function setContent(b64, dark, maxW) {
-  document.body.className = dark ? "dark" : "light";
-  var md = decodeURIComponent(escape(atob(b64)));
-  var p = protectMath(md);
+// 1つの本文(Markdown文字列)を要素に描画する。
+function fillContent(el, mdText) {
+  var p = protectMath(mdText || "");
   var html = marked.parse(p.md, { gfm: true, breaks: true });
-  // 退避した数式を HTML エスケープしつつ復元（KaTeX がテキストノードとして処理する）。
-  html = html.replace(/(\d+)/g, function (_, i) { return escapeHTML(p.store[+i]); });
-  var el = document.getElementById("content");
-  el.style.maxWidth = maxW + "px";
+  html = html.replace(/@@M(\d+)@@/g, function (_, i) { return escapeHTML(p.store[+i]); });
   el.innerHTML = html;
-  // 数式が無ければ KaTeX 走査をスキップ（大半の普通の文章で毎回の DOM 走査を省ける）。
   if (p.store.length) {
     try {
       renderMathInElement(el, {
@@ -144,15 +161,111 @@ function setContent(b64, dark, maxW) {
       });
     } catch (e) {}
   }
-  // 太字の取りこぼし(**...**)が残っているときだけ後処理する。
   if (html.indexOf("**") >= 0) applyCJKBold(el);
-  postSize();
-  // Web フォント読み込み後にレイアウトが変わるため再計測する。
-  setTimeout(postSize, 60);
-  setTimeout(postSize, 300);
 }
 
-window.addEventListener("resize", postSize);
+// ===== 吹き出しHTML生成 =====
+var state = { dark: false, generating: false, speaker: "AI" };
+
+function statsHTML(s) {
+  if (!s) return "";
+  function chip(icon, txt, tip) { return '<span class="chip" title="' + escapeAttr(tip) + '">' + icon + " " + escapeHTML(txt) + '</span>'; }
+  var tps = (s.tokensPerSecond != null) ? s.tokensPerSecond.toFixed(1) : "0.0";
+  var ttft = (s.ttft != null) ? s.ttft.toFixed(1) : "0.0";
+  return '<div class="stats">' +
+    chip("⚡", tps + " t/s", "トークン生成速度") +
+    chip("🏷", s.completionTokens + " tokens", "生成トークン数") +
+    chip("⏱", ttft + " s", "最初のトークンまでの時間") +
+    '</div>';
+}
+
+function sourcesHTML(sources) {
+  if (!sources || !sources.length) return "";
+  var items = sources.map(function (src) {
+    var host = "";
+    try { host = new URL(src.url).host; } catch (e) {}
+    return '<a class="source" href="' + escapeAttr(src.url) + '">' +
+      '<span class="src-title">' + escapeHTML(src.title) + '</span>' +
+      '<span class="src-host">' + escapeHTML(host) + '</span></a>';
+  }).join("");
+  return '<div class="sources"><div class="sources-h">🌐 Web検索 ' + sources.length + '件</div>' + items + '</div>';
+}
+
+// 1メッセージ分のラッパーHTML（.content は後で fillContent で埋める）。
+function bubbleHTML(m, idx, isLast) {
+  if (m.role === "system") {
+    return '<div class="system" data-i="' + idx + '">' +
+      '<div class="line"></div><div class="txt">' + escapeHTML(m.content) + '</div><div class="line"></div></div>';
+  }
+  var isUser = m.role === "user";
+  var who = isUser ? "user" : "assistant";
+  var label = isUser ? "あなた" : escapeHTML(state.speaker);
+  var loading = (!isUser && isLast && state.generating && !m.content);
+  var inner = loading
+    ? '<div class="dots"><span></span><span></span><span></span></div>'
+    : '<div class="content"></div>';
+  var extras = "";
+  if (!isUser) {
+    var ex = sourcesHTML(m.searchSources) + ((m.content && m.stats) ? statsHTML(m.stats) : "");
+    if (ex) extras = '<div class="extras">' + ex + '</div>';
+  }
+  return '<div class="msg ' + who + '" data-i="' + idx + '">' +
+    '<div class="row">' +
+      '<div class="avatar"></div>' +
+      '<div class="main"><div class="label">' + label + '</div>' +
+      '<div class="bubble">' + inner + '</div></div>' +
+    '</div>' + extras +
+    '</div>';
+}
+
+// 末尾メッセージのDOMノードに本文を流し込む（ローディング中は何もしない）。
+function fillNode(node, m) {
+  if (!node || m.role === "system") return;
+  var el = node.querySelector(".content");
+  if (el) fillContent(el, m.content);
+}
+
+// ===== 公開API（Swift から呼ぶ） =====
+function setMessages(msgsB64, dark, generating, speakerB64) {
+  state.dark = dark;
+  state.generating = generating;
+  state.speaker = speakerB64 ? decodeB64(speakerB64) : "AI";
+  document.body.className = dark ? "dark" : "light";
+  var msgs = JSON.parse(decodeB64(msgsB64));
+  var conv = document.getElementById("conversation");
+  conv.innerHTML = msgs.map(function (m, i) { return bubbleHTML(m, i, i === msgs.length - 1); }).join("");
+  msgs.forEach(function (m, i) {
+    fillNode(conv.querySelector('[data-i="' + i + '"]'), m);
+  });
+  scrollToBottom(true);
+}
+
+function updateLast(msgB64, idx, generating) {
+  state.generating = generating;
+  var m = JSON.parse(decodeB64(msgB64));
+  var conv = document.getElementById("conversation");
+  var old = conv.querySelector('[data-i="' + idx + '"]');
+  var tmp = document.createElement("div");
+  tmp.innerHTML = bubbleHTML(m, idx, true);
+  var fresh = tmp.firstElementChild;
+  if (old) { old.replaceWith(fresh); } else { conv.appendChild(fresh); }
+  fillNode(fresh, m);
+  scrollToBottom(false);
+}
+
+// ===== 自動スクロール（WebView内部スクロールをJSで制御） =====
+var autoFollow = true;
+function nearBottom() {
+  return (window.innerHeight + window.scrollY) >= (document.documentElement.scrollHeight - 60);
+}
+function scrollToBottom(force) {
+  if (force) autoFollow = true;
+  if (force || autoFollow) {
+    window.scrollTo(0, document.documentElement.scrollHeight);
+  }
+}
+// ユーザーが自分で上にスクロールしたら追従を止め、下端付近に戻れば再開する。
+window.addEventListener("scroll", function () { autoFollow = nearBottom(); }, { passive: true });
 </script>
 </body>
 </html>
