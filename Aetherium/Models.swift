@@ -38,13 +38,15 @@ struct Message: Identifiable, Codable {
     var id: UUID
     let role: String
     var content: String
+    var thinking: String?
     var stats: UsageStats?
     var searchSources: [SearchSource]?
 
-    init(id: UUID = UUID(), role: String, content: String, stats: UsageStats? = nil, searchSources: [SearchSource]? = nil) {
+    init(id: UUID = UUID(), role: String, content: String, thinking: String? = nil, stats: UsageStats? = nil, searchSources: [SearchSource]? = nil) {
         self.id = id
         self.role = role
         self.content = content
+        self.thinking = thinking
         self.stats = stats
         self.searchSources = searchSources
     }
@@ -54,11 +56,12 @@ struct Message: Identifiable, Codable {
         self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         self.role = try c.decode(String.self, forKey: .role)
         self.content = try c.decode(String.self, forKey: .content)
+        self.thinking = try c.decodeIfPresent(String.self, forKey: .thinking)
         self.stats = try c.decodeIfPresent(UsageStats.self, forKey: .stats)
         self.searchSources = try c.decodeIfPresent([SearchSource].self, forKey: .searchSources)
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, content, stats, searchSources }
+    private enum CodingKeys: String, CodingKey { case id, role, content, thinking, stats, searchSources }
 }
 
 struct VVStyle: Codable, Hashable {

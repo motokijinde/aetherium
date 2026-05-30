@@ -19,11 +19,16 @@ struct ConversationWebView: NSViewRepresentable {
     let dark: Bool
     let isGenerating: Bool
     let speakerName: String
+    let modelName: String
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> WKWebView {
-        let webView = ChatWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let config = WKWebViewConfiguration()
+        // 吹き出しのコピーボタン → JS から生テキストを受け取って NSPasteboard へ。
+        // file:// では navigator.clipboard が使えないため Swift 側でコピーする。
+        config.userContentController.add(context.coordinator, name: "copyToClipboard")
+        let webView = ChatWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         // 背景を透過させて、SwiftUI 側の背景を見せる。
         webView.setValue(false, forKey: "drawsBackground")
@@ -48,15 +53,16 @@ struct ConversationWebView: NSViewRepresentable {
     private func lastSignature() -> String {
         guard let m = messages.last else { return "" }
         let s = m.stats.map { "\($0.completionTokens)/\($0.tokensPerSecond ?? 0)/\($0.ttft ?? 0)" } ?? ""
-        return "\(m.content)\u{1}\(s)\u{1}\(isGenerating)"
+        return "\(m.content)\u{1}\(m.thinking ?? "")\u{1}\(s)\u{1}\(isGenerating)"
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var parent: ConversationWebView
         private var loaded = false
         private var lastCount = -1
         private var lastDark: Bool?
         private var lastSpeaker = "\u{1}"
+        private var lastModel = "\u{1}"
         private var lastLastSig = "\u{1}\u{1}"
         private var pending: DispatchWorkItem?
         private var lastRender = Date.distantPast
@@ -73,7 +79,7 @@ struct ConversationWebView: NSViewRepresentable {
             parent = newParent
             guard loaded else { return }
             // 件数・テーマ・話者の変化は構造変化 → 全再描画。
-            if parent.messages.count != lastCount || parent.dark != lastDark || parent.speakerName != lastSpeaker {
+            if parent.messages.count != lastCount || parent.dark != lastDark || parent.speakerName != lastSpeaker || parent.modelName != lastModel {
                 fullReload(webView)
                 return
             }
@@ -89,11 +95,13 @@ struct ConversationWebView: NSViewRepresentable {
             lastCount = parent.messages.count
             lastDark = parent.dark
             lastSpeaker = parent.speakerName
+            lastModel = parent.modelName
             lastLastSig = parent.lastSignature()
             pending?.cancel()
             guard let msgsB64 = ConversationWebView.encodeBase64(parent.messages) else { return }
             let speakerB64 = Data(parent.speakerName.utf8).base64EncodedString()
-            let js = "setMessages(\"\(msgsB64)\", \(parent.dark), \(parent.isGenerating), \"\(speakerB64)\")"
+            let modelB64 = Data(parent.modelName.utf8).base64EncodedString()
+            let js = "setMessages(\"\(msgsB64)\", \(parent.dark), \(parent.isGenerating), \"\(speakerB64)\", \"\(modelB64)\")"
             webView.evaluateJavaScript(js, completionHandler: nil)
         }
 
@@ -119,6 +127,14 @@ struct ConversationWebView: NSViewRepresentable {
             let idx = parent.messages.count - 1
             let js = "updateLast(\"\(b64)\", \(idx), \(parent.isGenerating))"
             webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+
+        // JS のコピーボタンから受け取った生テキストをクリップボードへ。
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "copyToClipboard", let text = message.body as? String else { return }
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
         }
 
         // リンクはアプリ内で遷移させず外部ブラウザで開く。

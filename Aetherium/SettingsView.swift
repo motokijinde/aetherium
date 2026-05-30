@@ -8,10 +8,12 @@ struct SettingsView: View {
         TabView {
             connectionTab
                 .tabItem { Label("接続", systemImage: "network") }
+            instructionsTab
+                .tabItem { Label("指示", systemImage: "person.text.rectangle") }
             voiceTab
                 .tabItem { Label("音声", systemImage: "speaker.wave.2") }
         }
-        .frame(width: 460, height: 320)
+        .frame(width: 460, height: 360)
         // AIが生成中は設定変更を防ぐ（メッセージ間の待機中は変更可）。
         .disabled(vm.isGenerating)
         .overlay(alignment: .bottom) {
@@ -51,6 +53,39 @@ struct SettingsView: View {
                 Spacer()
                 Button("デフォルトに戻す") { vm.resetServerURLsToDefaults() }
                     .font(.caption)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+
+    // MARK: - 指示（カスタム指示）
+
+    private var instructionsTab: some View {
+        Form {
+            Section {
+                Toggle("指示を有効にする", isOn: $vm.customInstructionsEnabled)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("AIへの指示")
+                    TextEditor(text: $vm.customInstructions)
+                        .font(.body)
+                        .frame(minHeight: 160)
+                        .opacity(vm.customInstructionsEnabled ? 1 : 0.4)
+                        .disabled(!vm.customInstructionsEnabled)
+                        .overlay(alignment: .topLeading) {
+                            if vm.customInstructions.isEmpty {
+                                Text("例：一人称は「あーし」で、常に明るく元気にギャル語で接してください。")
+                                    .foregroundColor(.secondary)
+                                    .padding(.top, 8).padding(.leading, 5)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                }
+            } header: {
+                Text("AIは、ここに書いた内容を毎回の会話で念頭に置いて応答します。")
+            } footer: {
+                Text("Apple Intelligence では、変更は次のコンテキストのリセット以降に反映されます。")
+                    .font(.caption).foregroundColor(.secondary)
             }
         }
         .formStyle(.grouped)

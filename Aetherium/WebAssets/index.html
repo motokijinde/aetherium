@@ -36,11 +36,35 @@
   .msg.assistant .avatar { background-color: #34c759; background-image: url("avatar-assistant.png"); }
   .msg.user .avatar { background-color: #0a84ff; background-image: url("avatar-user.png"); }
 
-  .main { display: flex; flex-direction: column; gap: 4px; max-width: min(720px, 78vw); min-width: 0; }
+  .main { position: relative; display: flex; flex-direction: column; gap: 4px; max-width: min(720px, 78vw); min-width: 0; }
+  /* AI側: row(アバター+吹き出し) と統計チップ・コピーを束ねる器。幅は吹き出し幅にフィット。
+     チップを row の外に置くことで、アバターは吹き出し下端に固定されたまま（チップに引っ張られない）。 */
+  .cluster { position: relative; display: flex; flex-direction: column; gap: 4px; width: fit-content; max-width: 100%; min-width: 0; }
   .msg.user .main { align-items: flex-end; }
   .label { font-size: 10px; font-weight: 700; color: #8e8e93; }
+  /* 話者名に併記するモデル名は、細字＋やや薄めにしてメリハリを付ける。 */
+  .label .model { font-weight: 400; opacity: 0.72; }
   /* 統計・ソースは行の外。アバター幅(32)+間隔(10)分インデントして吹き出し左端に揃える。 */
   .extras { padding-left: 42px; }
+
+  /* ===== メッセージ操作ボタン（コピー等） ===== */
+  /* .main 内に置き、user は align-items:flex-end で右寄せになる。普段は隠してホバーで表示。 */
+  /* position:absolute で .main に対して浮かせる。レイアウトの流れから外れるので、
+     ホバーで出ても下のメッセージや統計チップ・アバターを一切ずらさない。
+     AI(assistant)は吹き出し左下（チップは右寄せ）、ユーザーは吹き出し右下に表示。 */
+  .actions { position: absolute; display: none; gap: 2px; }
+  /* AI: cluster 基準で吹き出し左下（left:42px = アバター32+間隔10、吹き出し左端の位置）。 */
+  .msg.assistant .actions { left: 42px; bottom: 0; }
+  /* ユーザー: main 基準で吹き出し右下。 */
+  .msg.user .actions { right: 0; top: 100%; }
+  .msg:hover .actions { display: flex; }
+  .act-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; padding: 0; border: none; background: transparent;
+    cursor: pointer; color: #8e8e93; border-radius: 6px;
+  }
+  .act-btn:hover { background: rgba(127,127,127,0.18); color: inherit; }
+  .act-btn.copied { color: #34c759; }
 
   .bubble {
     /* 中身の幅に合わせる（ラベル幅へ引き伸ばされない）。長文は最大幅で折り返す。ユーザー・アシスタント共通。 */
@@ -79,10 +103,24 @@
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
   /* ===== 統計チップ ===== */
-  .stats { display: flex; gap: 4px; margin-top: 2px; flex-wrap: wrap; }
+  .stats { display: flex; gap: 4px; margin-top: 2px; flex-wrap: wrap; justify-content: flex-end; }
   .chip {
     font-size: 8px; font-family: ui-monospace, Menlo, monospace; color: #8e8e93;
     background: rgba(127,127,127,0.12); padding: 3px 6px; border-radius: 6px; white-space: nowrap;
+  }
+
+  /* ===== 思考プロセス（折りたたみ） ===== */
+  .thinking { margin: 0 0 6px; border-left: 2px solid rgba(127,127,127,0.35); padding-left: 8px; }
+  .thinking > summary {
+    cursor: pointer; font-size: 11px; font-weight: 600; color: #8e8e93;
+    list-style: none; user-select: none;
+  }
+  .thinking > summary::-webkit-details-marker { display: none; }
+  .thinking > summary::before { content: "▶ "; font-size: 9px; }
+  .thinking[open] > summary::before { content: "▼ "; }
+  .think-body {
+    white-space: pre-wrap; word-break: break-word; font-size: 11.5px; line-height: 1.5;
+    color: #8e8e93; margin-top: 4px; max-height: 260px; overflow-y: auto;
   }
 
   /* ===== 検索ソース ===== */
@@ -106,6 +144,7 @@
 <script>
 // ===== 共通ユーティリティ =====
 function decodeB64(b64) { return decodeURIComponent(escape(atob(b64))); }
+function encodeB64(s) { return btoa(unescape(encodeURIComponent(s))); }
 function escapeHTML(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 function escapeAttr(s) { return escapeHTML(s).replace(/"/g, "&quot;"); }
 
@@ -169,7 +208,37 @@ function fillContent(el, mdText) {
 }
 
 // ===== 吹き出しHTML生成 =====
-var state = { dark: false, generating: false, speaker: "AI" };
+var state = { dark: false, generating: false, speaker: "AI", model: "" };
+
+// AIの話者ラベル。モデル名があれば "話者 (モデル)" の形で、モデル部は細字spanにする。
+function speakerLabelHTML() {
+  var name = escapeHTML(state.speaker || "AI");
+  if (!state.model) return name;
+  return name + ' <span class="model">(' + escapeHTML(state.model) + ')</span>';
+}
+
+var ICON_COPY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+var ICON_CHECK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
+// 吹き出し下の操作ボタン群。生テキスト(Markdown)は data-md に base64 で持たせる。
+function actionsHTML(m) {
+  if (!m.content) return "";
+  return '<div class="actions">' +
+    '<button class="act-btn" type="button" title="コピー" onclick="copyMessage(this)" data-md="' +
+    encodeB64(m.content) + '">' + ICON_COPY + '</button>' +
+    '</div>';
+}
+
+// コピーボタン押下 → Swift(NSPasteboard)へ生テキストを渡し、一時的に✓表示。
+function copyMessage(btn) {
+  try {
+    var text = decodeB64(btn.getAttribute("data-md"));
+    window.webkit.messageHandlers.copyToClipboard.postMessage(text);
+  } catch (e) {}
+  btn.classList.add("copied");
+  btn.innerHTML = ICON_CHECK;
+  setTimeout(function () { btn.classList.remove("copied"); btn.innerHTML = ICON_COPY; }, 1200);
+}
 
 function statsHTML(s) {
   if (!s) return "";
@@ -181,6 +250,16 @@ function statsHTML(s) {
     chip("🏷", s.completionTokens + " tokens", "生成トークン数") +
     chip("⏱", ttft + " s", "最初のトークンまでの時間") +
     '</div>';
+}
+
+// 思考プロセス（折りたたみ）。生成中の末尾メッセージのときは開いた状態で表示する。
+function thinkingHTML(m, isLast) {
+  if (!m.thinking) return "";
+  var openAttr = (isLast && state.generating) ? " open" : "";
+  return '<details class="thinking"' + openAttr + '>' +
+    '<summary>思考プロセス</summary>' +
+    '<div class="think-body">' + escapeHTML(m.thinking) + '</div>' +
+  '</details>';
 }
 
 function sourcesHTML(sources) {
@@ -202,22 +281,40 @@ function bubbleHTML(m, idx, isLast) {
       '<div class="line"></div><div class="txt">' + escapeHTML(m.content) + '</div><div class="line"></div></div>';
   }
   var isUser = m.role === "user";
-  var who = isUser ? "user" : "assistant";
-  var label = isUser ? "あなた" : escapeHTML(state.speaker);
-  var loading = (!isUser && isLast && state.generating && !m.content);
+  var label = isUser ? "あなた" : speakerLabelHTML();
+  // 本文も思考もまだ無いときだけローディングドットを出す（思考が来たら思考を見せる）。
+  var loading = (!isUser && isLast && state.generating && !m.content && !m.thinking);
+  // 生成中の末尾メッセージ（ストリーミング中）はコピーボタンを出さない。確定後に表示する。
+  var streaming = (!isUser && isLast && state.generating);
   var inner = loading
     ? '<div class="dots"><span></span><span></span><span></span></div>'
     : '<div class="content"></div>';
-  var extras = "";
-  if (!isUser) {
-    var ex = sourcesHTML(m.searchSources) + ((m.content && m.stats) ? statsHTML(m.stats) : "");
-    if (ex) extras = '<div class="extras">' + ex + '</div>';
+  var actions = (loading || streaming) ? '' : actionsHTML(m);
+
+  if (isUser) {
+    // ユーザー: 統計なし。コピーは main 基準で吹き出し右下に絶対配置（従来通り）。
+    return '<div class="msg user" data-i="' + idx + '">' +
+      '<div class="row">' +
+        '<div class="avatar"></div>' +
+        '<div class="main"><div class="label">' + label + '</div>' +
+        '<div class="bubble">' + inner + '</div>' + actions + '</div>' +
+      '</div>' +
+    '</div>';
   }
-  return '<div class="msg ' + who + '" data-i="' + idx + '">' +
-    '<div class="row">' +
-      '<div class="avatar"></div>' +
-      '<div class="main"><div class="label">' + label + '</div>' +
-      '<div class="bubble">' + inner + '</div></div>' +
+
+  // AI: 統計チップ(右寄せ)とコピー(左下)を cluster でまとめる。統計を row の外に置くことで、
+  // アバターが統計に引っ張られず吹き出し下端に固定される。検索ソースは従来通り行の外（左寄せ）。
+  var statsBlock = (m.content && m.stats) ? statsHTML(m.stats) : "";
+  var srcs = sourcesHTML(m.searchSources);
+  var extras = srcs ? '<div class="extras">' + srcs + '</div>' : "";
+  var thinkBlock = thinkingHTML(m, isLast);
+  return '<div class="msg assistant" data-i="' + idx + '">' +
+    '<div class="cluster">' +
+      '<div class="row">' +
+        '<div class="avatar"></div>' +
+        '<div class="main"><div class="label">' + label + '</div>' +
+        '<div class="bubble">' + thinkBlock + inner + '</div></div>' +
+      '</div>' + statsBlock + actions +
     '</div>' + extras +
     '</div>';
 }
@@ -230,10 +327,11 @@ function fillNode(node, m) {
 }
 
 // ===== 公開API（Swift から呼ぶ） =====
-function setMessages(msgsB64, dark, generating, speakerB64) {
+function setMessages(msgsB64, dark, generating, speakerB64, modelB64) {
   state.dark = dark;
   state.generating = generating;
   state.speaker = speakerB64 ? decodeB64(speakerB64) : "AI";
+  state.model = modelB64 ? decodeB64(modelB64) : "";
   document.body.className = dark ? "dark" : "light";
   var msgs = JSON.parse(decodeB64(msgsB64));
   var conv = document.getElementById("conversation");

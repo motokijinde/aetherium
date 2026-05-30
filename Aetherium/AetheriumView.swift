@@ -95,6 +95,32 @@ struct AetheriumView: View {
         }
     }
 
+    /// 入力欄下の機能トグル（検索・思考・音声）の共通チップUI。
+    /// ON=青背景、OFF=薄背景、無効=フェードで状態を示し、パディング＋contentShapeで当たり判定を広げる。
+    @ViewBuilder
+    private func toggleChip(icon: String, label: String, isOn: Bool, isEnabled: Bool,
+                            help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 13, weight: .medium))
+                Text(label).font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(isOn ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color.secondary))
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(
+                Capsule().fill(isOn ? Color.blue.opacity(0.15) : Color.primary.opacity(0.06))
+            )
+            .overlay(
+                Capsule().strokeBorder(isOn ? Color.blue.opacity(0.45) : Color.clear, lineWidth: 1)
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.4)
+        .help(help)
+    }
+
     /// 🔍 トグルのツールチップ（無効理由を説明）。
     private var webSearchHelp: String {
         if vm.contextHasExchange { return "会話中は変更できません。コンテキストをクリアすると変更できます" }
@@ -180,7 +206,12 @@ struct AetheriumView: View {
                         }.padding(30).background(.thinMaterial).cornerRadius(24).frame(width: 380)
 
                         VStack(spacing: 12) {
-                            Button(action: { withAnimation(.spring()) { vm.isInSession = true } }) {
+                            Button(action: {
+                                // Apple Intelligence は最新のカスタム指示を焼き込むためセッションを作り直す
+                                // （開始前は会話ゼロなので作り直しても何も失わない）。
+                                if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
+                                withAnimation(.spring()) { vm.isInSession = true }
+                            }) {
                                 Text("Start Session").font(.headline).frame(width: 220, height: 40)
                             }
                             .buttonStyle(.borderedProminent)
@@ -211,33 +242,35 @@ struct AetheriumView: View {
                             messages: vm.messages,
                             dark: colorScheme == .dark,
                             isGenerating: vm.isGenerating,
-                            speakerName: vm.currentSpeakerName
+                            speakerName: vm.currentSpeakerName,
+                            modelName: vm.activeModelLabel
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         VStack(spacing: 8) {
                             MultilineInputField(text: $inputText, height: $inputHeight, onSubmit: { submitInput() })
                                 .frame(height: inputHeight)
-                            HStack(spacing: 16) {
-                                // 🔍 Web検索トグル（コンテキストが空のときだけ切替可）
-                                Button {
+                            HStack(spacing: 8) {
+                                // 🌐 Web検索トグル（コンテキストが空のときだけ切替可）
+                                toggleChip(icon: "globe", label: "検索",
+                                           isOn: vm.webSearchEnabled, isEnabled: vm.canToggleWebSearch,
+                                           help: webSearchHelp) {
                                     vm.webSearchEnabled.toggle()
                                     if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
-                                } label: {
-                                    Image(systemName: "globe")
-                                        .font(.system(size: 16))
-                                        .foregroundStyle(vm.webSearchEnabled ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color.secondary))
                                 }
-                                .buttonStyle(.plain)
-                                .disabled(!vm.canToggleWebSearch)
-                                .help(webSearchHelp)
+                                // 💡 思考モードトグル（Ollamaで対応モデルのときだけ表示・常時切替可）
+                                if vm.aiProvider == .ollama && vm.ollamaThinkingSupported {
+                                    toggleChip(icon: vm.thinkingEnabled ? "lightbulb.fill" : "lightbulb", label: "思考",
+                                               isOn: vm.thinkingEnabled, isEnabled: true,
+                                               help: vm.thinkingEnabled ? "思考モード: ON" : "思考モード: OFF") {
+                                        vm.thinkingEnabled.toggle()
+                                    }
+                                }
                                 // 🔊 音声読み上げトグル（常時切替可）
-                                Button { vm.voiceEnabled.toggle() } label: {
-                                    Image(systemName: vm.voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                                        .font(.system(size: 16))
-                                        .foregroundStyle(vm.voiceEnabled ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color.secondary))
+                                toggleChip(icon: vm.voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill", label: "音声",
+                                           isOn: vm.voiceEnabled, isEnabled: true,
+                                           help: vm.voiceEnabled ? "音声読み上げ: ON" : "音声読み上げ: OFF") {
+                                    vm.voiceEnabled.toggle()
                                 }
-                                .buttonStyle(.plain)
-                                .help(vm.voiceEnabled ? "音声読み上げ: ON" : "音声読み上げ: OFF")
                                 Spacer()
                                 if vm.isGenerating || vm.isAudioPlaying {
                                     Button(action: { vm.stopGeneration() }) {

@@ -64,9 +64,12 @@ final class ChatViewModel: ObservableObject {
     @Published var aiProvider: AIProvider = .ollama { didSet { persist(aiProvider.rawValue, "aiProvider") } }
     @Published var appleIntelligenceError: String? = nil
     @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, "webSearchEnabled") } }
+    @Published var thinkingEnabled: Bool = false { didSet { persist(thinkingEnabled, "thinkingEnabled") } }
     @Published var searxngURL: String = ChatViewModel.defaultSearxngURL { didSet { persist(searxngURL, "searxngURL") } }
     @Published var voicevoxURL: String = ChatViewModel.defaultVoicevoxURL { didSet { persist(voicevoxURL, "voicevoxURL") } }
     @Published var llmServerURL: String = ChatViewModel.defaultLLMServerURL { didSet { persist(llmServerURL, "llmServerURL") } }
+    @Published var customInstructions: String = "" { didSet { persist(customInstructions, "customInstructions") } }
+    @Published var customInstructionsEnabled: Bool = true { didSet { persist(customInstructionsEnabled, "customInstructionsEnabled") } }
     @Published var contextUsageRatio: Double = 0.0
     @Published var ollamaContextSize: Int = 4096 { didSet { persist(ollamaContextSize, "ollamaContextSize") } }
     static let ollamaContextSizeOptions = [2048, 4096, 8192, 16384, 32768, 65536]
@@ -75,6 +78,7 @@ final class ChatViewModel: ObservableObject {
     static let defaultVoicevoxURL = "http://127.0.0.1:50021"
     static let defaultSearxngURL = "http://127.0.0.1:8080"
     @Published var ollamaToolsSupported: Bool = false
+    @Published var ollamaThinkingSupported: Bool = false
     @Published var ollamaContextUsedTokens: Int = 0
     /// 現在のコンテキストにやり取りがあるか（Web検索トグルの切替可否に使用）。
     @Published var contextHasExchange: Bool = false
@@ -151,9 +155,12 @@ final class ChatViewModel: ObservableObject {
         if d.object(forKey: "aetherium.voiceEnabled") != nil { voiceEnabled = d.bool(forKey: "aetherium.voiceEnabled") }
         if let v = d.string(forKey: "aetherium.aiProvider"), let p = AIProvider(rawValue: v) { aiProvider = p }
         if d.object(forKey: "aetherium.webSearchEnabled") != nil { webSearchEnabled = d.bool(forKey: "aetherium.webSearchEnabled") }
+        if d.object(forKey: "aetherium.thinkingEnabled") != nil { thinkingEnabled = d.bool(forKey: "aetherium.thinkingEnabled") }
         if let v = d.string(forKey: "aetherium.searxngURL"), !v.isEmpty { searxngURL = v }
         if let v = d.string(forKey: "aetherium.voicevoxURL"), !v.isEmpty { voicevoxURL = v }
         if let v = d.string(forKey: "aetherium.llmServerURL"), !v.isEmpty { llmServerURL = v }
+        if let v = d.string(forKey: "aetherium.customInstructions") { customInstructions = v }
+        if d.object(forKey: "aetherium.customInstructionsEnabled") != nil { customInstructionsEnabled = d.bool(forKey: "aetherium.customInstructionsEnabled") }
         if d.object(forKey: "aetherium.ollamaContextSize") != nil { ollamaContextSize = d.integer(forKey: "aetherium.ollamaContextSize") }
     }
 
@@ -190,10 +197,40 @@ final class ChatViewModel: ObservableObject {
 
     private let webSearchInstructions = "Web検索ツールを使用する場合、検索結果のテキストをそのまま出力しないでください。検索結果を参照して内容を理解し、自分の言葉で簡潔に回答してください。"
 
+    /// アプリ固有のシステム指示。表示（KaTeX）を壊さないための固定ルールで、常に適用する。
+    static let appSystemInstructions = """
+    数式は KaTeX で表示されます。次のお作法に従ってください。
+    - ディスプレイ数式は $$ ... $$ で囲む
+    - インライン数式は \\( ... \\) で囲む（$ ... $ は使わない）
+    - 数式をコードブロック(```)で囲まない（そのまま文字列として表示されてしまう）
+    """
+
+    /// 有効かつ空でないカスタム指示（無効・空ならnil）。注入・トークン見積もりの共通判定に使う。
+    private var activeCustomInstruction: String? {
+        guard customInstructionsEnabled else { return nil }
+        let trimmed = customInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// アプリのシステム指示・ユーザーのカスタム指示・Web検索用指示を結合した、セッションに渡す最終instructions。
+    /// アプリのシステム指示が常に含まれるため必ず非nil。
+    private var effectiveInstructions: String? {
+        var parts: [String] = [ChatViewModel.appSystemInstructions]
+        if let instr = activeCustomInstruction { parts.append(instr) }
+        if webSearchEnabled { parts.append(webSearchInstructions) }
+        return parts.joined(separator: "\n\n")
+    }
+
     private func makeSession() -> LanguageModelSession {
-        webSearchEnabled
-            ? LanguageModelSession(tools: [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL)], instructions: webSearchInstructions)
-            : LanguageModelSession()
+        let tools = webSearchEnabled
+            ? [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL)]
+            : []
+        switch (tools.isEmpty, effectiveInstructions) {
+        case (false, let instr?): return LanguageModelSession(tools: tools, instructions: instr)
+        case (false, nil):        return LanguageModelSession(tools: tools)
+        case (true, let instr?):  return LanguageModelSession(instructions: instr)
+        case (true, nil):         return LanguageModelSession()
+        }
     }
 
     private func makeTrimmedSession() -> LanguageModelSession {
@@ -242,6 +279,9 @@ final class ChatViewModel: ObservableObject {
         var totalChars = trimmable.reduce(messages[newUserIdx].content.count) {
             $0 + messages[$1].content.count
         }
+        // システム指示・カスタム指示は毎回先頭に注入されトリム対象外なので、固定オーバーヘッドとして見積もりに加算する
+        totalChars += ChatViewModel.appSystemInstructions.count
+        if let instr = activeCustomInstruction { totalChars += instr.count }
         var newStart = ollamaContextStartIndex
         for idx in trimmable {
             guard totalChars > targetChars else { break }
@@ -284,6 +324,7 @@ final class ChatViewModel: ObservableObject {
 
     func fetchModelInfo(for model: String) async {
         ollamaToolsSupported = false
+        ollamaThinkingSupported = false
         guard let url = URL(string: "http://127.0.0.1:11434/api/show") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -294,6 +335,7 @@ final class ChatViewModel: ObservableObject {
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             if let caps = json["capabilities"] as? [String] {
                 ollamaToolsSupported = caps.contains("tools")
+                ollamaThinkingSupported = caps.contains("thinking")
             }
             // num_ctx の自動取得は行わない：ユーザーがスライダーで選んだ値を尊重する
         } catch { }
@@ -510,6 +552,16 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Ollama
 
+    /// llmServerURL（OpenAI互換: .../v1）から末尾の /v1 を外したネイティブAPIのベースURL。
+    /// 思考モード(think)はネイティブ /api/chat でしか動かないため、こちらを使う。
+    private var ollamaNativeBaseURL: String {
+        var s = llmServerURL
+        if s.hasSuffix("/") { s.removeLast() }
+        if s.hasSuffix("/v1") { s.removeLast(3) }
+        if s.hasSuffix("/") { s.removeLast() }
+        return s
+    }
+
     private var ollamaWebSearchToolSpec: [String: Any] {
         [
             "type": "function",
@@ -580,6 +632,12 @@ final class ChatViewModel: ObservableObject {
                 .filter { $0.role != "system" }
                 .map { ["role": $0.role, "content": $0.content] }
 
+            // アプリのシステム指示（常に）＋ユーザーのカスタム指示 を1つのsystemにまとめて履歴の先頭へ差し込む
+            // （画面表示用のお知らせsystemメッセージとは別管理）
+            var systemParts = [ChatViewModel.appSystemInstructions]
+            if let instr = self.activeCustomInstruction { systemParts.append(instr) }
+            history.insert(["role": "system", "content": systemParts.joined(separator: "\n\n")], at: 0)
+
             let useTools = self.webSearchEnabled && self.ollamaToolsSupported
             var toolRoundCount = 0
             // KVキャッシュヒット時: prompt_tokens = 新規評価分のみ（小さい） → 累積で補う
@@ -596,21 +654,24 @@ final class ChatViewModel: ObservableObject {
                     "model": self.selectedModel,
                     "messages": history,
                     "stream": true,
-                    "stream_options": ["include_usage": true],
                     "options": ["num_ctx": self.ollamaContextSize]
                 ]
                 if useTools {
                     requestBody["tools"] = [self.ollamaWebSearchToolSpec]
                 }
+                // 思考モード: 対応モデルのときのみ think を明示送信（未指定だと既定で有効化されるため、OFFも明示する）
+                if self.ollamaThinkingSupported {
+                    requestBody["think"] = self.thinkingEnabled
+                }
 
-                guard let url = URL(string: "\(self.llmServerURL)/chat/completions") else { break }
+                guard let url = URL(string: "\(self.ollamaNativeBaseURL)/api/chat") else { break }
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
 
-                var finishReason: String? = nil
-                var accumulatedToolCalls: [Int: (id: String, name: String, arguments: String)] = [:]
+                // ネイティブ /api/chat のツール呼び出しは id/index 無し・引数はオブジェクトで丸ごと届く
+                var accumulatedToolCalls: [(name: String, arguments: [String: Any])] = []
 
                 do {
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -639,58 +700,59 @@ final class ChatViewModel: ObservableObject {
 
                     for try await line in bytes.lines {
                         if Task.isCancelled { break }
-                        guard line.hasPrefix("data: ") else { continue }
-                        let payload = line.dropFirst(6)
-                        if payload == "[DONE]" { break }
-                        guard let data = payload.data(using: .utf8),
+                        // ネイティブ /api/chat は行区切りJSON（1行=1オブジェクト）。SSEの "data: " 接頭辞は無い。
+                        guard !line.isEmpty,
+                              let data = line.data(using: .utf8),
                               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                         else { continue }
 
-                        if let choices = json["choices"] as? [[String: Any]], let first = choices.first {
-                            if let fr = first["finish_reason"] as? String { finishReason = fr }
-                            if let delta = first["delta"] as? [String: Any] {
-                                // Regular content delta
-                                if let content = delta["content"] as? String, !content.isEmpty {
-                                    if firstTokenTime == nil { firstTokenTime = Date() }
-                                    if roundFirstTokenTime == nil { roundFirstTokenTime = Date() }
-                                    await MainActor.run {
-                                        if let i = indexForAssistant() { self.messages[i].content += content }
-                                    }
-                                    localSpeechBuffer += content
-                                    if content.contains(where: { "。！？\n".contains($0) }) {
-                                        let sentence = localSpeechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-                                        if !sentence.isEmpty && !Task.isCancelled {
-                                            await MainActor.run { self.enqueueSpeech(sentence, sessionID: audioSessionID) }
-                                        }
-                                        localSpeechBuffer = ""
+                        if let message = json["message"] as? [String: Any] {
+                            // 思考デルタ（content とは別フィールドに溜める。音声読み上げ対象にはしない）
+                            if let thinking = message["thinking"] as? String, !thinking.isEmpty {
+                                await MainActor.run {
+                                    if let i = indexForAssistant() {
+                                        self.messages[i].thinking = (self.messages[i].thinking ?? "") + thinking
                                     }
                                 }
-                                // Accumulate streaming tool call fragments
-                                if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
-                                    for tc in toolCalls {
-                                        let idx = tc["index"] as? Int ?? 0
-                                        var existing = accumulatedToolCalls[idx] ?? (id: "", name: "", arguments: "")
-                                        if let id = tc["id"] as? String, !id.isEmpty { existing.id = id }
-                                        if let fn = tc["function"] as? [String: Any] {
-                                            if let name = fn["name"] as? String, !name.isEmpty { existing.name = name }
-                                            if let args = fn["arguments"] as? String { existing.arguments += args }
-                                        }
-                                        accumulatedToolCalls[idx] = existing
+                            }
+                            // 本文デルタ
+                            if let content = message["content"] as? String, !content.isEmpty {
+                                if firstTokenTime == nil { firstTokenTime = Date() }
+                                if roundFirstTokenTime == nil { roundFirstTokenTime = Date() }
+                                await MainActor.run {
+                                    if let i = indexForAssistant() { self.messages[i].content += content }
+                                }
+                                localSpeechBuffer += content
+                                if content.contains(where: { "。！？\n".contains($0) }) {
+                                    let sentence = localSpeechBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    if !sentence.isEmpty && !Task.isCancelled {
+                                        await MainActor.run { self.enqueueSpeech(sentence, sessionID: audioSessionID) }
+                                    }
+                                    localSpeechBuffer = ""
+                                }
+                            }
+                            // ツール呼び出し（丸ごと届く・断片化しない）
+                            if let toolCalls = message["tool_calls"] as? [[String: Any]] {
+                                for tc in toolCalls {
+                                    if let fn = tc["function"] as? [String: Any],
+                                       let name = fn["name"] as? String {
+                                        let args = fn["arguments"] as? [String: Any] ?? [:]
+                                        accumulatedToolCalls.append((name: name, arguments: args))
                                     }
                                 }
                             }
                         }
 
-                        // Usage stats (sent in final chunk by Ollama)
-                        if let usageDict = json["usage"] as? [String: Any] {
-                            let promptTokens = usageDict["prompt_tokens"] as? Int ?? 0
-                            let completionTokens = usageDict["completion_tokens"] as? Int ?? 0
-                            let totalTokens = usageDict["total_tokens"] as? Int ?? (promptTokens + completionTokens)
+                        // 最終チャンク（done:true）にトークン数が入る
+                        if (json["done"] as? Bool) == true {
+                            let promptTokens = json["prompt_eval_count"] as? Int ?? 0
+                            let completionTokens = json["eval_count"] as? Int ?? 0
+                            let totalTokens = promptTokens + completionTokens
                             // tokensPerSecond は当該ラウンド内の生成時間で算出（ツールラウンドを跨ぐと不正確になるため）
                             let roundDuration = Date().timeIntervalSince(roundFirstTokenTime ?? roundStartTime)
                             // TTFT はユーザーが押してから最初の可視トークンまで（全ラウンド通算）
                             let ttft = firstTokenTime?.timeIntervalSince(requestStartTime)
-                            roundTotalTokens += promptTokens + completionTokens
+                            roundTotalTokens += totalTokens
                             roundCompletionTokens += completionTokens
                             await MainActor.run {
                                 if let i = indexForAssistant() {
@@ -726,30 +788,29 @@ final class ChatViewModel: ObservableObject {
                 }
 
                 // If model requested tool calls, execute them and loop
-                if finishReason == "tool_calls" && !accumulatedToolCalls.isEmpty && toolRoundCount < 3 {
+                if !accumulatedToolCalls.isEmpty && toolRoundCount < 3 {
                     let currentContent = await MainActor.run {
                         indexForAssistant().map { self.messages[$0].content } ?? ""
                     }
                     var assistantHistoryMsg: [String: Any] = ["role": "assistant", "content": currentContent]
-                    assistantHistoryMsg["tool_calls"] = accumulatedToolCalls.sorted(by: { $0.key < $1.key }).map { (_, tc) -> [String: Any] in
-                        ["id": tc.id, "type": "function", "function": ["name": tc.name, "arguments": tc.arguments] as [String: Any]]
+                    assistantHistoryMsg["tool_calls"] = accumulatedToolCalls.map { tc -> [String: Any] in
+                        ["function": ["name": tc.name, "arguments": tc.arguments] as [String: Any]]
                     }
                     history.append(assistantHistoryMsg)
 
+                    // content は途中の中途半端な本文を消して最終回答に差し替えるためクリアする。
+                    // thinking はクリアしない（検索を決めた理由＋検索後の思考をラウンドまたぎで残す）。
                     await MainActor.run {
                         if let i = indexForAssistant() { self.messages[i].content = "" }
                     }
 
-                    for (_, tc) in accumulatedToolCalls.sorted(by: { $0.key < $1.key }) {
-                        guard tc.name == "webSearch",
-                              let argData = tc.arguments.data(using: .utf8),
-                              let argJson = try? JSONSerialization.jsonObject(with: argData) as? [String: Any],
-                              let query = argJson["query"] as? String else {
-                            history.append(["role": "tool", "tool_call_id": tc.id, "content": "ツール不明"])
+                    for tc in accumulatedToolCalls {
+                        guard tc.name == "webSearch", let query = tc.arguments["query"] as? String else {
+                            history.append(["role": "tool", "content": "ツール不明", "tool_name": tc.name])
                             continue
                         }
                         let result = await self.executeWebSearch(query: query)
-                        history.append(["role": "tool", "tool_call_id": tc.id, "content": result] as [String: Any])
+                        history.append(["role": "tool", "content": result, "tool_name": tc.name])
                     }
 
                     toolRoundCount += 1
