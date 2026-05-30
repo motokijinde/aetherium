@@ -1,6 +1,10 @@
 import SwiftUI
 import Combine
 import FoundationModels
+import PDFKit
+import ImageIO
+import UniformTypeIdentifiers
+import AppKit
 
 actor SearchResultsCollector {
     var sources: [SearchSource] = []
@@ -61,7 +65,7 @@ final class ChatViewModel: ObservableObject {
     @Published var speechSpeed: Double = 1.00 { didSet { persist(speechSpeed, "speechSpeed") } }
     @Published var voiceEnabled: Bool = true { didSet { persist(voiceEnabled, "voiceEnabled") } }
     @Published var isFetching = false
-    @Published var aiProvider: AIProvider = .ollama { didSet { persist(aiProvider.rawValue, "aiProvider") } }
+    @Published var aiProvider: AIProvider = .ollama { didSet { persist(aiProvider.rawValue, "aiProvider"); pendingAttachments.removeAll() } }
     @Published var appleIntelligenceError: String? = nil
     @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, "webSearchEnabled") } }
     @Published var thinkingEnabled: Bool = false { didSet { persist(thinkingEnabled, "thinkingEnabled") } }
@@ -79,7 +83,12 @@ final class ChatViewModel: ObservableObject {
     static let defaultSearxngURL = "http://127.0.0.1:8080"
     @Published var ollamaToolsSupported: Bool = false
     @Published var ollamaThinkingSupported: Bool = false
+    @Published var ollamaVisionSupported: Bool = false
     @Published var ollamaContextUsedTokens: Int = 0
+    /// 次に送信するメッセージへ添付する画像/ファイル（送信時にクリア）。
+    @Published var pendingAttachments: [Attachment] = []
+    /// 添付の取り込み失敗を伝えるメッセージ（表示後にnilへ戻す）。
+    @Published var attachmentError: String? = nil
     /// 現在のコンテキストにやり取りがあるか（Web検索トグルの切替可否に使用）。
     @Published var contextHasExchange: Bool = false
     private let estimatedContextCharLimit = 8192  // ~4096 tokens * 2 chars/token
@@ -325,6 +334,7 @@ final class ChatViewModel: ObservableObject {
     func fetchModelInfo(for model: String) async {
         ollamaToolsSupported = false
         ollamaThinkingSupported = false
+        ollamaVisionSupported = false
         guard let url = URL(string: "http://127.0.0.1:11434/api/show") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -336,9 +346,104 @@ final class ChatViewModel: ObservableObject {
             if let caps = json["capabilities"] as? [String] {
                 ollamaToolsSupported = caps.contains("tools")
                 ollamaThinkingSupported = caps.contains("thinking")
+                ollamaVisionSupported = caps.contains("vision")
             }
             // num_ctx の自動取得は行わない：ユーザーがスライダーで選んだ値を尊重する
         } catch { }
+    }
+
+    // MARK: - Attachments
+
+    /// 画像を取り込む（1枚のみ・既存画像は置き換え）。長辺がしきい値を超える場合だけ縮小する。
+    func addImageAttachment(_ url: URL) {
+        guard let data = try? Data(contentsOf: url),
+              let src = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(src) > 0,
+              let (base64, mime) = Self.encodeImage(data: data, source: src) else {
+            attachmentError = "画像を読み込めませんでした: \(url.lastPathComponent)"
+            return
+        }
+        setImageAttachment(base64: base64, mime: mime, filename: url.lastPathComponent)
+    }
+
+    /// クリップボードから貼り付けた画像（PNG Data）を添付する。
+    /// Vision対応なら取り込んで true、非対応・失敗なら通知して false（呼び出し側はテキスト貼付へフォールバック）。
+    func pasteImage(_ data: Data) -> Bool {
+        guard aiProvider == .ollama, ollamaVisionSupported else {
+            attachmentError = "このモデルは画像を扱えません（Vision非対応のモデルです）"
+            return false
+        }
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(src) > 0,
+              let (base64, mime) = Self.encodeImage(data: data, source: src) else {
+            attachmentError = "貼り付けた画像を読み込めませんでした"
+            return false
+        }
+        setImageAttachment(base64: base64, mime: mime, filename: "貼り付け画像.png")
+        return true
+    }
+
+    /// 画像添付を1枚に保つ（既存画像を置き換える）共通処理。
+    private func setImageAttachment(base64: String, mime: String, filename: String) {
+        pendingAttachments.removeAll { $0.kind == .image }
+        pendingAttachments.append(Attachment(kind: .image, filename: filename, payload: base64, mime: mime))
+    }
+
+    /// ファイルを取り込む（複数可・同名は重複スルー）。テキスト抽出に失敗したものは弾く。
+    func addFileAttachments(_ urls: [URL]) {
+        for url in urls {
+            let name = url.lastPathComponent
+            if pendingAttachments.contains(where: { $0.kind == .file && $0.filename == name }) { continue }
+            guard let text = Self.extractText(from: url), !text.isEmpty else {
+                attachmentError = "テキストを抽出できませんでした: \(name)"
+                continue
+            }
+            pendingAttachments.append(Attachment(kind: .file, filename: name, payload: text))
+        }
+    }
+
+    func removeAttachment(_ id: UUID) {
+        pendingAttachments.removeAll { $0.id == id }
+    }
+
+    /// 画像を base64 と MIME に変換する。長辺がしきい値以下なら原寸のまま（無劣化）、超える場合のみ長辺を縮小して JPEG 化する。
+    private static let imageMaxSide = 1568
+    private static func encodeImage(data: Data, source src: CGImageSource) -> (String, String)? {
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        let w = props?[kCGImagePropertyPixelWidth] as? Int ?? 0
+        let h = props?[kCGImagePropertyPixelHeight] as? Int ?? 0
+        // しきい値以下は原寸そのまま（無駄な再エンコードで劣化させない）
+        if w > 0, h > 0, max(w, h) <= imageMaxSide {
+            let mime = (CGImageSourceGetType(src) as String?).flatMap { UTType($0)?.preferredMIMEType } ?? "image/jpeg"
+            return (data.base64EncodedString(), mime)
+        }
+        // 大きい画像は長辺を縮小して JPEG 化
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: imageMaxSide,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        guard let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else {
+            return (data.base64EncodedString(), "image/jpeg")
+        }
+        let rep = NSBitmapImageRep(cgImage: thumb)
+        guard let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else {
+            return (data.base64EncodedString(), "image/jpeg")
+        }
+        return (jpeg.base64EncodedString(), "image/jpeg")
+    }
+
+    /// 対応ファイルからテキストを抽出する（pdf/txt/md）。抽出できなければ nil。
+    private static func extractText(from url: URL) -> String? {
+        switch url.pathExtension.lowercased() {
+        case "pdf":
+            guard let doc = PDFDocument(url: url), let s = doc.string, !s.isEmpty else { return nil }
+            return s
+        case "txt", "md":
+            return try? String(contentsOf: url, encoding: .utf8)
+        default:
+            return nil
+        }
     }
 
     // MARK: - Fetch
@@ -610,7 +715,9 @@ final class ChatViewModel: ObservableObject {
         let audioSessionID = UUID()
         currentAudioSessionID = audioSessionID
         let assistantID = UUID()
-        messages.append(Message(role: "user", content: text))
+        let atts = pendingAttachments
+        pendingAttachments = []
+        messages.append(Message(role: "user", content: text, attachments: atts.isEmpty ? nil : atts))
         messages.append(Message(id: assistantID, role: "assistant", content: ""))
 
         generatingTask = Task {
@@ -627,10 +734,26 @@ final class ChatViewModel: ObservableObject {
             trimHistoryToFit()
 
             // Build history from context window, excluding visual system messages
-            var history: [[String: Any]] = Array(self.messages[self.ollamaContextStartIndex...])
+            let historyMessages = Array(self.messages[self.ollamaContextStartIndex...])
                 .dropLast()  // exclude empty assistant placeholder
                 .filter { $0.role != "system" }
-                .map { ["role": $0.role, "content": $0.content] }
+            let lastHistoryIdx = historyMessages.count - 1
+            var history: [[String: Any]] = historyMessages.enumerated().map { (i, m) -> [String: Any] in
+                var content = m.content
+                // 添付ファイルの抽出テキストは content の先頭へ合成する（テキストは軽いので全ターン残す）。
+                let fileTexts = (m.attachments ?? []).filter { $0.kind == .file }
+                    .map { "[添付ファイル: \($0.filename)]\n\($0.payload)" }
+                if !fileTexts.isEmpty {
+                    content = fileTexts.joined(separator: "\n\n") + "\n\n" + content
+                }
+                var dict: [String: Any] = ["role": m.role, "content": content]
+                // 画像は重いので最新ターン（＝今回のユーザー入力）のみ images で送る。
+                if i == lastHistoryIdx {
+                    let images = (m.attachments ?? []).filter { $0.kind == .image }.map { $0.payload }
+                    if !images.isEmpty { dict["images"] = images }
+                }
+                return dict
+            }
 
             // アプリのシステム指示（常に）＋ユーザーのカスタム指示 を1つのsystemにまとめて履歴の先頭へ差し込む
             // （画面表示用のお知らせsystemメッセージとは別管理）
@@ -897,6 +1020,7 @@ final class ChatViewModel: ObservableObject {
     func resetSession() {
         stopGeneration()
         messages = []
+        pendingAttachments = []
         isInSession = false
         contextHasExchange = false
         ollamaContextStartIndex = 0

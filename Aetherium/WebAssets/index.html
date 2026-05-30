@@ -95,6 +95,15 @@
   img { max-width: 100%; }
   .katex-display { margin: 0.4em 0; overflow-x: auto; overflow-y: hidden; }
 
+  /* ===== 添付（画像サムネ・ファイルチップ） ===== */
+  .atts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .att-img { max-width: 180px; max-height: 180px; border-radius: 10px; display: block; }
+  .att-file {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+    background: rgba(255,255,255,0.22); padding: 4px 9px; border-radius: 8px; max-width: 220px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
   /* ===== ローディングドット ===== */
   .dots { display: flex; gap: 4px; padding: 3px 0; }
   .dots span { width: 6px; height: 6px; border-radius: 50%; background: #0a84ff; animation: blink 1.2s infinite; }
@@ -220,6 +229,18 @@ function speakerLabelHTML() {
 var ICON_COPY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 var ICON_CHECK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 
+// 添付（画像サムネ・ファイルチップ）。base64 はそのまま data URL に埋める。
+function attachmentsHTML(m) {
+  if (!m.attachments || !m.attachments.length) return "";
+  var items = m.attachments.map(function (a) {
+    if (a.kind === "image") {
+      return '<img class="att-img" src="data:' + (a.mime || "image/jpeg") + ';base64,' + a.payload + '">';
+    }
+    return '<span class="att-file">📄 ' + escapeHTML(a.filename) + '</span>';
+  }).join("");
+  return '<div class="atts">' + items + '</div>';
+}
+
 // 吹き出し下の操作ボタン群。生テキスト(Markdown)は data-md に base64 で持たせる。
 function actionsHTML(m) {
   if (!m.content) return "";
@@ -297,7 +318,7 @@ function bubbleHTML(m, idx, isLast) {
       '<div class="row">' +
         '<div class="avatar"></div>' +
         '<div class="main"><div class="label">' + label + '</div>' +
-        '<div class="bubble">' + inner + '</div>' + actions + '</div>' +
+        '<div class="bubble">' + attachmentsHTML(m) + inner + '</div>' + actions + '</div>' +
       '</div>' +
     '</div>';
   }

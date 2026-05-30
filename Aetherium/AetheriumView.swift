@@ -1,5 +1,21 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
+
+// ⌘V を横取りし、クリップボードに画像があれば添付に回す NSTextView。
+// onPasteImage が true を返したら（画像を消費したら）テキスト貼り付けは行わない。
+final class PastableTextView: NSTextView {
+    var onPasteImage: (() -> Bool)?
+    // isRichText=false だとテキスト型しか受け付けず、画像のみのクリップボードでは
+    // Paste メニュー・⌘V が無効化され paste(_:) も呼ばれない。画像型を受理対象に加えて有効化する。
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        super.readablePasteboardTypes + [.png, .tiff]
+    }
+    override func paste(_ sender: Any?) {
+        if onPasteImage?() == true { return }
+        super.paste(sender)
+    }
+}
 
 // 複数行入力欄（NSTextView ラッパー）
 // Enter で送信、Shift+Enter で改行。改行はそのまま text に保持される。
@@ -9,13 +25,18 @@ struct MultilineInputField: NSViewRepresentable {
     @Binding var height: CGFloat
     var maxLines: Int = 5
     var onSubmit: () -> Void
+    /// クリップボード画像を消費したら true（テキスト貼り付けを抑止する）。
+    var onPasteImage: () -> Bool
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView()
+        let scrollView = NSScrollView()
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
-        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        scrollView.autohidesScrollers = true
+
+        let textView = PastableTextView()
+        textView.onPasteImage = onPasteImage
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.font = .systemFont(ofSize: NSFont.systemFontSize)
@@ -26,6 +47,17 @@ struct MultilineInputField: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.allowsUndo = true
         textView.string = text
+        // NSTextView.scrollableTextView() 相当の伸縮設定（高さ自動計算と相性を合わせる）。
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        // 縦は無制限にしないと usedRect が頭打ちになり、複数行の高さ計算が崩れる。
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+
+        scrollView.documentView = textView
         return scrollView
     }
 
@@ -89,10 +121,75 @@ struct AetheriumView: View {
 
     private func submitInput() {
         let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !vm.isGenerating && !t.isEmpty {
+        // 本文が空でも添付があれば送れる。
+        if !vm.isGenerating && (!t.isEmpty || !vm.pendingAttachments.isEmpty) {
             inputText = ""
             vm.sendMessage(t)
         }
+    }
+
+    /// 送信ボタン・Enter を無効化すべきか（本文も添付も無いとき）。
+    private var canSubmit: Bool {
+        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !vm.pendingAttachments.isEmpty
+    }
+
+    private func pickImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg]
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { vm.addImageAttachment(url) }
+    }
+
+    private func pickFiles() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.pdf, .plainText, UTType(filenameExtension: "md")].compactMap { $0 }
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK { vm.addFileAttachments(panel.urls) }
+    }
+
+    /// ⌘V 時にクリップボードの画像を添付に回す。画像が無ければ false（通常テキスト貼り付けへ）。
+    private func handlePasteImage() -> Bool {
+        let pb = NSPasteboard.general
+        var data = pb.data(forType: .png)
+        if data == nil, let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) {
+            data = rep.representation(using: .png, properties: [:])
+        }
+        guard let d = data else { return false }
+        return vm.pasteImage(d)
+    }
+
+    /// 添付ボタン用の単発アクションチップ（既存トグルOFFと同系の見た目）。
+    /// 生成中も「次の送信の準備」として押せるよう、常時有効。
+    @ViewBuilder
+    private func actionChip(icon: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.secondary)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Capsule().fill(Color.primary.opacity(0.06)))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    /// 入力欄の上に並ぶ添付プレビュー（×で個別削除）。
+    @ViewBuilder
+    private func attachmentPreview(_ att: Attachment) -> some View {
+        HStack(spacing: 6) {
+            if att.kind == .image, let data = Data(base64Encoded: att.payload), let img = NSImage(data: data) {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                    .frame(width: 32, height: 32).clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Image(systemName: "doc.text.fill").font(.system(size: 14)).foregroundStyle(Color.secondary)
+            }
+            Text(att.filename).font(.system(size: 11)).lineLimit(1).truncationMode(.middle).frame(maxWidth: 130)
+            Button(action: { vm.removeAttachment(att.id) }) {
+                Image(systemName: "xmark.circle.fill").font(.system(size: 13)).foregroundStyle(Color.secondary)
+            }.buttonStyle(.plain).help("添付を外す")
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(Capsule().fill(Color.primary.opacity(0.08)))
     }
 
     /// 入力欄下の機能トグル（検索・思考・音声）の共通チップUI。
@@ -247,7 +344,19 @@ struct AetheriumView: View {
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         VStack(spacing: 8) {
-                            MultilineInputField(text: $inputText, height: $inputHeight, onSubmit: { submitInput() })
+                            if !vm.pendingAttachments.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(vm.pendingAttachments) { att in
+                                            attachmentPreview(att)
+                                        }
+                                    }
+                                    .padding(.horizontal, 2)
+                                }
+                            }
+                            MultilineInputField(text: $inputText, height: $inputHeight,
+                                                onSubmit: { submitInput() },
+                                                onPasteImage: { handlePasteImage() })
                                 .frame(height: inputHeight)
                             HStack(spacing: 8) {
                                 // 🌐 Web検索トグル（コンテキストが空のときだけ切替可）
@@ -271,6 +380,15 @@ struct AetheriumView: View {
                                            help: vm.voiceEnabled ? "音声読み上げ: ON" : "音声読み上げ: OFF") {
                                     vm.voiceEnabled.toggle()
                                 }
+                                // 添付はOllama経路のみ対応（Apple Intelligenceは対象外）。
+                                if vm.aiProvider == .ollama {
+                                    // 📎 ファイル添付（pdf/txt/md・常時／生成中も準備として可）。
+                                    actionChip(icon: "paperclip", help: "ファイルを添付 (pdf/txt/md)") { pickFiles() }
+                                    // 🖼️ 画像添付（Vision対応モデルのときだけ表示／生成中も準備として可）。
+                                    if vm.ollamaVisionSupported {
+                                        actionChip(icon: "photo", help: "画像を添付 (png/jpg)") { pickImage() }
+                                    }
+                                }
                                 Spacer()
                                 if vm.isGenerating || vm.isAudioPlaying {
                                     Button(action: { vm.stopGeneration() }) {
@@ -283,10 +401,10 @@ struct AetheriumView: View {
                                     Button(action: { submitInput() }) {
                                         Image(systemName: "arrow.up.circle.fill")
                                             .font(.system(size: 30))
-                                            .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? AnyShapeStyle(Color.gray) : AnyShapeStyle(Color.blue.gradient))
+                                            .foregroundStyle(canSubmit ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(Color.gray))
                                     }
                                     .buttonStyle(.plain)
-                                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                    .disabled(!canSubmit)
                                 }
                             }
                         }
@@ -344,6 +462,14 @@ struct AetheriumView: View {
             }
             .navigationTitle("Aetherium")
             .navigationSubtitle(vm.isInSession ? "Session with \(vm.currentSpeakerName) (\(vm.activeModelLabel))" : "Settings")
+        }
+        .alert("添付エラー", isPresented: Binding(
+            get: { vm.attachmentError != nil },
+            set: { if !$0 { vm.attachmentError = nil } }
+        )) {
+            Button("OK", role: .cancel) { vm.attachmentError = nil }
+        } message: {
+            Text(vm.attachmentError ?? "")
         }
         .frame(minWidth: 600, minHeight: 700)
     }
