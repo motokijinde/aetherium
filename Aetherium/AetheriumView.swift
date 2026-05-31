@@ -141,8 +141,8 @@ struct AetheriumView: View {
     }
 
     private func pickFiles() {
+        // 拡張子では絞らず全ファイル選択可にし、テキストとして読めるかは取り込み時に判定する。
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf, .plainText, UTType(filenameExtension: "md")].compactMap { $0 }
         panel.allowsMultipleSelection = true
         if panel.runModal() == .OK { vm.addFileAttachments(panel.urls) }
     }

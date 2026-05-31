@@ -389,16 +389,19 @@ final class ChatViewModel: ObservableObject {
         pendingAttachments.append(Attachment(kind: .image, filename: filename, payload: base64, mime: mime))
     }
 
-    /// ファイルを取り込む（複数可・同名は重複スルー）。テキスト抽出に失敗したものは弾く。
+    /// ファイルを取り込む（複数可・同名は重複スルー）。テキストとして読めないもの・大きすぎるものは弾く。
     func addFileAttachments(_ urls: [URL]) {
         for url in urls {
             let name = url.lastPathComponent
             if pendingAttachments.contains(where: { $0.kind == .file && $0.filename == name }) { continue }
-            guard let text = Self.extractText(from: url), !text.isEmpty else {
-                attachmentError = "テキストを抽出できませんでした: \(name)"
-                continue
+            switch Self.extractText(from: url) {
+            case .text(let t):
+                pendingAttachments.append(Attachment(kind: .file, filename: name, payload: t))
+            case .tooLarge:
+                attachmentError = "ファイルが大きすぎます（約1MBまで）: \(name)"
+            case .unreadable:
+                attachmentError = "テキストとして読み込めないファイルです: \(name)"
             }
-            pendingAttachments.append(Attachment(kind: .file, filename: name, payload: text))
         }
     }
 
@@ -433,17 +436,36 @@ final class ChatViewModel: ObservableObject {
         return (jpeg.base64EncodedString(), "image/jpeg")
     }
 
-    /// 対応ファイルからテキストを抽出する（pdf/txt/md）。抽出できなければ nil。
-    private static func extractText(from url: URL) -> String? {
-        switch url.pathExtension.lowercased() {
-        case "pdf":
-            guard let doc = PDFDocument(url: url), let s = doc.string, !s.isEmpty else { return nil }
-            return s
-        case "txt", "md":
-            return try? String(contentsOf: url, encoding: .utf8)
-        default:
-            return nil
+    /// ファイル取り込みの判定結果。
+    private enum ExtractResult {
+        case text(String)
+        case tooLarge
+        case unreadable
+    }
+
+    /// 1ファイルあたりの上限（コンテキスト暴走の安全弁）。
+    private static let maxFileBytes = 1_000_000
+
+    /// pdfはPDFKitで抽出、それ以外は拡張子を問わず「テキストとして読めるか」で判定する。
+    /// エンコーディングは自動判定（BOM等でUTF-16等も）→UTF-8の順。読めなければバイナリ扱いで弾く。
+    private static func extractText(from url: URL) -> ExtractResult {
+        if url.pathExtension.lowercased() == "pdf" {
+            guard let doc = PDFDocument(url: url), let s = doc.string, !s.isEmpty else { return .unreadable }
+            return s.utf8.count > maxFileBytes ? .tooLarge : .text(s)
         }
+        guard let data = try? Data(contentsOf: url) else { return .unreadable }
+        if data.count > maxFileBytes { return .tooLarge }
+        if data.isEmpty { return .unreadable }
+        // エンコーディング自動判定（BOM等でUTF-16なども推定）。
+        var enc: String.Encoding = .utf8
+        if let s = try? String(contentsOf: url, usedEncoding: &enc), !s.isEmpty {
+            return .text(s)
+        }
+        // フォールバック：UTF-8として読めるか。
+        if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+            return .text(s)
+        }
+        return .unreadable  // どのエンコーディングでも読めない＝バイナリ
     }
 
     // MARK: - Fetch
