@@ -80,6 +80,31 @@
   /* ===== Markdown 要素 ===== */
   p { margin: 0 0 0.5em; }
   pre { background: rgba(0,0,0,0.18); padding: 8px 10px; border-radius: 8px; overflow-x: auto; }
+  /* コードブロックをヘッダー付きカードにする（ファイル名/言語＋コピー/保存/折りたたみ）。
+     吹き出し内に収めるため、統計のズレ要因だった「吹き出し外チップ」は廃止した。 */
+  .codecard { margin: 0.4em 0; border-radius: 8px; overflow: hidden; background: rgba(0,0,0,0.18); }
+  .codecard-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 6px 4px 10px; background: rgba(127,127,127,0.14);
+  }
+  .cc-name {
+    flex: 1; min-width: 0; font-size: 11px; color: #8e8e93;
+    font-family: ui-monospace, Menlo, monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cc-btns { display: flex; gap: 2px; flex: 0 0 auto; }
+  .cc-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; padding: 0; border: none; background: transparent;
+    cursor: pointer; color: #8e8e93; border-radius: 6px;
+  }
+  .cc-btn:hover { background: rgba(127,127,127,0.25); color: inherit; }
+  .cc-btn.copied { color: #34c759; }
+  .cc-toggle-icon { display: inline-block; transition: transform 0.15s; }
+  .codecard.collapsed .cc-toggle-icon { transform: rotate(-90deg); }
+  .codecard.collapsed .codecard-body { display: none; }
+  /* カード内の pre は背景・角丸・外余白をカードへ移譲（二重背景を消す。内側paddingは残す）。 */
+  .codecard-body pre { margin: 0; border-radius: 0; background: transparent; }
   code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.9em; }
   :not(pre) > code { background: rgba(127,127,127,0.2); padding: 1px 4px; border-radius: 4px; }
   pre code { background: none; padding: 0; }
@@ -228,6 +253,124 @@ function speakerLabelHTML() {
 
 var ICON_COPY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 var ICON_CHECK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+var ICON_DOWNLOAD = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+var ICON_CHEVRON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+
+// Swift(NSSavePanel)へ {filename, content} を渡して保存する。
+function saveFile(filename, content) {
+  try { window.webkit.messageHandlers.saveFile.postMessage({ filename: filename, content: content }); }
+  catch (e) {}
+}
+
+// パス成分を捨てて basename のみにする（パストラバーサル防止。Swift側でも再度防御する）。
+function sanitizeName(name) {
+  name = (name || "").split("/").pop().split("\\").pop();
+  return name || "file.txt";
+}
+
+// コードフェンスの info（language-xxx から復元）から「明示されたファイル名」を取り出す。
+// "lang:name" → name ／ 単一でも "." を含めばファイル名 ／ 言語名だけ・空 → null（ファイルではない）。
+function explicitFilename(info) {
+  info = (info || "").trim();
+  if (!info) return null;
+  var parts = info.split(":");
+  if (parts.length >= 2 && parts.slice(1).join(":").trim()) return sanitizeName(parts.slice(1).join(":").trim());
+  if (info.indexOf(".") >= 0) return sanitizeName(info);
+  return null;
+}
+
+// 言語名 → 拡張子（ファイル名が明示されていないコードの保存名フォールバック用）。
+var LANG_EXT = {
+  python:"py", py:"py", javascript:"js", js:"js", typescript:"ts", ts:"ts",
+  swift:"swift", json:"json", markdown:"md", md:"md", html:"html", css:"css",
+  shell:"sh", bash:"sh", sh:"sh", csv:"csv", xml:"xml", yaml:"yaml", yml:"yml",
+  text:"txt", txt:"txt", c:"c", cpp:"cpp", "c++":"cpp", java:"java", go:"go",
+  ruby:"rb", rb:"rb", php:"php", sql:"sql"
+};
+
+// info の先頭トークンを言語名として返す（"name.ext" のようにファイル名のみなら ""）。
+function langOnly(info) {
+  info = (info || "").trim();
+  if (!info) return "";
+  var parts = info.split(":");
+  var head = parts[0].trim();
+  if (parts.length < 2 && head.indexOf(".") >= 0) return "";
+  return head;
+}
+
+// カードのヘッダーボタンを作る共通ヘルパ。
+function makeCardButton(title, inner) {
+  var b = document.createElement("button");
+  b.className = "cc-btn"; b.type = "button"; b.title = title; b.innerHTML = inner;
+  return b;
+}
+
+// 描画済みコードブロックを、ヘッダー付きカード（ファイル名/言語＋コピー/保存/折りたたみ）にする。
+// ファイル名が無くてもカード化し、言語名表示＋snippet.<ext> で保存できる（AI側の指示精度に依存しない）。
+function decorateCodeBlocks(root) {
+  var pres = root.querySelectorAll("pre");
+  for (var i = 0; i < pres.length; i++) {
+    var pre = pres[i];
+    if (pre.parentNode && pre.parentNode.className === "codecard-body") continue; // 二重カード化防止
+    var code = pre.querySelector("code");
+    if (!code) continue;
+    var text = code.textContent || "";
+    if (!text.trim()) continue;
+    var info = "";
+    (code.className || "").split(/\s+/).forEach(function (cls) {
+      if (cls.indexOf("language-") === 0) info = cls.slice(9); // "language-".length
+    });
+    var fname = explicitFilename(info);
+    var lang = langOnly(info);
+    var displayName = fname || lang || "テキスト";
+    var dlName = fname || ("snippet." + (LANG_EXT[lang.toLowerCase()] || "txt"));
+
+    var card = document.createElement("div");
+    card.className = "codecard";
+    var head = document.createElement("div");
+    head.className = "codecard-head";
+    head.innerHTML = '<span class="cc-name">📄 ' + escapeHTML(displayName) + '</span>';
+    var btns = document.createElement("div");
+    btns.className = "cc-btns";
+
+    var copyBtn = makeCardButton("コピー", ICON_COPY);
+    (function (tx, b) {
+      b.addEventListener("click", function () {
+        try { window.webkit.messageHandlers.copyToClipboard.postMessage(tx); } catch (e) {}
+        b.classList.add("copied"); b.innerHTML = ICON_CHECK;
+        setTimeout(function () { b.classList.remove("copied"); b.innerHTML = ICON_COPY; }, 1200);
+      });
+    })(text, copyBtn);
+
+    var dlBtn = makeCardButton("保存", ICON_DOWNLOAD);
+    (function (nm, tx) {
+      dlBtn.addEventListener("click", function () { saveFile(nm, tx); });
+    })(dlName, text);
+
+    var tgBtn = makeCardButton("折りたたみ", '<span class="cc-toggle-icon">' + ICON_CHEVRON + '</span>');
+    (function (c) {
+      tgBtn.addEventListener("click", function () { c.classList.toggle("collapsed"); });
+    })(card);
+
+    btns.appendChild(copyBtn);
+    btns.appendChild(dlBtn);
+    btns.appendChild(tgBtn);
+    head.appendChild(btns);
+
+    var body = document.createElement("div");
+    body.className = "codecard-body";
+    pre.parentNode.insertBefore(card, pre);
+    card.appendChild(head);
+    card.appendChild(body);
+    body.appendChild(pre);
+  }
+}
+
+// メッセージ操作の「Markdownで保存」ボタン → 本文(生Markdown)を message.md として保存。
+function saveMessage(btn) {
+  try { saveFile("message.md", decodeB64(btn.getAttribute("data-md"))); }
+  catch (e) {}
+}
 
 // 添付（画像サムネ・ファイルチップ）。base64 はそのまま data URL に埋める。
 function attachmentsHTML(m) {
@@ -244,10 +387,13 @@ function attachmentsHTML(m) {
 // 吹き出し下の操作ボタン群。生テキスト(Markdown)は data-md に base64 で持たせる。
 function actionsHTML(m) {
   if (!m.content) return "";
-  return '<div class="actions">' +
-    '<button class="act-btn" type="button" title="コピー" onclick="copyMessage(this)" data-md="' +
-    encodeB64(m.content) + '">' + ICON_COPY + '</button>' +
-    '</div>';
+  var md = encodeB64(m.content);
+  var copyBtn = '<button class="act-btn" type="button" title="コピー" onclick="copyMessage(this)" data-md="' + md + '">' + ICON_COPY + '</button>';
+  // 資料(Markdown文書)はAIメッセージ単位で .md 保存できる（コードはブロックごとに保存）。
+  var saveBtn = (m.role === "assistant")
+    ? '<button class="act-btn" type="button" title="Markdownで保存" onclick="saveMessage(this)" data-md="' + md + '">' + ICON_DOWNLOAD + '</button>'
+    : '';
+  return '<div class="actions">' + copyBtn + saveBtn + '</div>';
 }
 
 // コピーボタン押下 → Swift(NSPasteboard)へ生テキストを渡し、一時的に✓表示。
@@ -341,10 +487,14 @@ function bubbleHTML(m, idx, isLast) {
 }
 
 // 末尾メッセージのDOMノードに本文を流し込む（ローディング中は何もしない）。
-function fillNode(node, m) {
+function fillNode(node, m, streaming) {
   if (!node || m.role === "system") return;
   var el = node.querySelector(".content");
-  if (el) fillContent(el, m.content);
+  if (el) {
+    fillContent(el, m.content);
+    // 生成中(末尾ストリーミング)はカード化しない。確定後の再描画でコードブロックをカード化する。
+    if (!streaming) decorateCodeBlocks(el);
+  }
 }
 
 // ===== 公開API（Swift から呼ぶ） =====
@@ -358,7 +508,8 @@ function setMessages(msgsB64, dark, generating, speakerB64, modelB64) {
   var conv = document.getElementById("conversation");
   conv.innerHTML = msgs.map(function (m, i) { return bubbleHTML(m, i, i === msgs.length - 1); }).join("");
   msgs.forEach(function (m, i) {
-    fillNode(conv.querySelector('[data-i="' + i + '"]'), m);
+    var streaming = (m.role !== "user" && i === msgs.length - 1 && state.generating);
+    fillNode(conv.querySelector('[data-i="' + i + '"]'), m, streaming);
   });
   scrollToBottom(true);
 }
@@ -372,7 +523,7 @@ function updateLast(msgB64, idx, generating) {
   tmp.innerHTML = bubbleHTML(m, idx, true);
   var fresh = tmp.firstElementChild;
   if (old) { old.replaceWith(fresh); } else { conv.appendChild(fresh); }
-  fillNode(fresh, m);
+  fillNode(fresh, m, generating);
   scrollToBottom(false);
 }
 

@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import AppKit
+import UniformTypeIdentifiers
 
 /// テキスト上でカーソルが「矢印 ⇄ I 字」に点滅する macOS の WKWebView 既知の挙動を抑える。
 /// 外側の WKWebView 側のカーソル更新を無効化し、WebKit 内部が決めたカーソル
@@ -28,6 +29,8 @@ struct ConversationWebView: NSViewRepresentable {
         // 吹き出しのコピーボタン → JS から生テキストを受け取って NSPasteboard へ。
         // file:// では navigator.clipboard が使えないため Swift 側でコピーする。
         config.userContentController.add(context.coordinator, name: "copyToClipboard")
+        // コードブロック・メッセージの保存ボタン → JS から {filename, content} を受け取って NSSavePanel へ。
+        config.userContentController.add(context.coordinator, name: "saveFile")
         let webView = ChatWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         // 背景を透過させて、SwiftUI 側の背景を見せる。
@@ -129,12 +132,33 @@ struct ConversationWebView: NSViewRepresentable {
             webView.evaluateJavaScript(js, completionHandler: nil)
         }
 
-        // JS のコピーボタンから受け取った生テキストをクリップボードへ。
+        // JS のコピー／保存ボタンから受け取ったデータを処理する。
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.name == "copyToClipboard", let text = message.body as? String else { return }
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
+            switch message.name {
+            case "copyToClipboard":
+                guard let text = message.body as? String else { return }
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+            case "saveFile":
+                guard let dict = message.body as? [String: Any],
+                      let content = dict["content"] as? String else { return }
+                // ファイル名はパス成分を捨てて basename のみにする（パストラバーサル防止）。
+                let raw = (dict["filename"] as? String) ?? ""
+                var name = (raw as NSString).lastPathComponent
+                if name.isEmpty { name = "download.txt" }
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = name
+                let ext = (name as NSString).pathExtension
+                if !ext.isEmpty, let type = UTType(filenameExtension: ext) {
+                    panel.allowedContentTypes = [type]
+                }
+                if panel.runModal() == .OK, let url = panel.url {
+                    try? content.write(to: url, atomically: true, encoding: .utf8)
+                }
+            default:
+                return
+            }
         }
 
         // リンクはアプリ内で遷移させず外部ブラウザで開く。
