@@ -44,8 +44,6 @@
   .label { font-size: 10px; font-weight: 700; color: #8e8e93; }
   /* 話者名に併記するモデル名は、細字＋やや薄めにしてメリハリを付ける。 */
   .label .model { font-weight: 400; opacity: 0.72; }
-  /* 統計・ソースは行の外。アバター幅(32)+間隔(10)分インデントして吹き出し左端に揃える。 */
-  .extras { padding-left: 42px; }
 
   /* ===== メッセージ操作ボタン（コピー等） ===== */
   /* .main 内に置き、user は align-items:flex-end で右寄せになる。普段は隠してホバーで表示。 */
@@ -157,15 +155,25 @@
     color: #8e8e93; margin-top: 4px; max-height: 260px; overflow-y: auto;
   }
 
-  /* ===== 検索ソース ===== */
-  .sources { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
-  .sources-h { font-size: 8px; font-weight: 700; color: #8e8e93; }
-  .source {
-    display: flex; gap: 6px; align-items: center; font-size: 8px;
-    background: rgba(10,132,255,0.06); padding: 3px 8px; border-radius: 6px; color: inherit;
+  /* ===== 検索ソース（折りたたみ。思考プロセスと同じ開閉UI） ===== */
+  .sources { margin: 6px 0 0; }
+  .sources > summary {
+    cursor: pointer; font-size: 11px; font-weight: 600; color: #8e8e93;
+    list-style: none; user-select: none;
   }
+  .sources > summary::-webkit-details-marker { display: none; }
+  .sources > summary::before { content: "▶ "; font-size: 9px; }
+  .sources[open] > summary::before { content: "▼ "; }
+  .sources-list { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+  /* 各ソースは下線なしのボタン風。通常は薄く、ホバーで文字が濃くなり押せる感を出す。 */
+  .source {
+    display: flex; gap: 8px; align-items: baseline; font-size: 11px;
+    background: rgba(127,127,127,0.1); padding: 5px 9px; border-radius: 8px;
+    color: #8e8e93; text-decoration: none; transition: color 0.12s, background 0.12s;
+  }
+  .source:hover { background: rgba(127,127,127,0.18); color: inherit; text-decoration: none; }
   .src-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .src-host { color: #8e8e93; font-family: ui-monospace, Menlo, monospace; white-space: nowrap; }
+  .src-host { color: #8e8e93; font-family: ui-monospace, Menlo, monospace; white-space: nowrap; font-size: 10px; }
 
   /* ===== システムメッセージ ===== */
   .system { display: flex; align-items: center; gap: 8px; justify-content: center; padding: 4px 24px; }
@@ -438,7 +446,10 @@ function sourcesHTML(sources) {
       '<span class="src-title">' + escapeHTML(src.title) + '</span>' +
       '<span class="src-host">' + escapeHTML(host) + '</span></a>';
   }).join("");
-  return '<div class="sources"><div class="sources-h">🌐 Web検索 ' + sources.length + '件</div>' + items + '</div>';
+  return '<details class="sources">' +
+    '<summary>Web検索 ' + sources.length + '件</summary>' +
+    '<div class="sources-list">' + items + '</div>' +
+  '</details>';
 }
 
 // 1メッセージ分のラッパーHTML（.content は後で fillContent で埋める）。
@@ -470,19 +481,19 @@ function bubbleHTML(m, idx, isLast) {
   }
 
   // AI: 統計チップ(右寄せ)とコピー(左下)を cluster でまとめる。統計を row の外に置くことで、
-  // アバターが統計に引っ張られず吹き出し下端に固定される。検索ソースは従来通り行の外（左寄せ）。
+  // アバターが統計に引っ張られず吹き出し下端に固定される。
+  // 思考プロセスは本文の上、検索ソース（根拠）は本文の下に折りたたみで置く。
   var statsBlock = (m.content && m.stats) ? statsHTML(m.stats) : "";
   var srcs = sourcesHTML(m.searchSources);
-  var extras = srcs ? '<div class="extras">' + srcs + '</div>' : "";
   var thinkBlock = thinkingHTML(m, isLast);
   return '<div class="msg assistant" data-i="' + idx + '">' +
     '<div class="cluster">' +
       '<div class="row">' +
         '<div class="avatar"></div>' +
         '<div class="main"><div class="label">' + label + '</div>' +
-        '<div class="bubble">' + thinkBlock + inner + '</div></div>' +
+        '<div class="bubble">' + thinkBlock + inner + srcs + '</div></div>' +
       '</div>' + statsBlock + actions +
-    '</div>' + extras +
+    '</div>' +
     '</div>';
 }
 
