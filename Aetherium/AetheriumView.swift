@@ -176,6 +176,8 @@ struct AetheriumView: View {
     @State private var inputText = ""
     @State private var rotationAngle: Double = 0
     @State private var inputHeight: CGFloat = 38
+    // PDF出力用に live な会話 WebView を保持するブリッジ。
+    @State private var exporter = ConversationExporter()
 
     private func submitInput() {
         let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -203,6 +205,35 @@ struct AetheriumView: View {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         if panel.runModal() == .OK { vm.addFileAttachments(panel.urls) }
+    }
+
+    /// 会話ログのデフォルトファイル名（会話ログ_yyyyMMdd_HHmm）。
+    private func exportFileName(ext: String) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd_HHmmss"
+        return "会話ログ_\(f.string(from: Date())).\(ext)"
+    }
+
+    /// 表示中の会話を Markdown で保存する。
+    private func saveMarkdown() {
+        let md = ConversationMarkdown.build(messages: vm.messages, speakerName: vm.currentSpeakerName,
+                                            modelName: vm.activeModelLabel, userName: vm.displayUserName)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = exportFileName(ext: "md")
+        if let t = UTType(filenameExtension: "md") { panel.allowedContentTypes = [t] }
+        if panel.runModal() == .OK, let url = panel.url {
+            try? md.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// 表示中の会話を PDF（見た目そのまま）で保存する。
+    private func savePDF() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = exportFileName(ext: "pdf")
+        panel.allowedContentTypes = [.pdf]
+        if panel.runModal() == .OK, let url = panel.url {
+            exporter.exportPDF(to: url) { _ in }
+        }
     }
 
     /// ⌘V 時にクリップボードの画像を添付に回す。画像が無ければ false（通常テキスト貼り付けへ）。
@@ -369,6 +400,7 @@ struct AetheriumView: View {
                             modelName: vm.activeModelLabel,
                             userName: vm.displayUserName,
                             revision: vm.chatRevision,
+                            exporter: exporter,
                             onRegenerate: { vm.regenerate(messageID: $0) },
                             onSelectVariant: { vm.selectVariant(messageID: $0, dir: $1) }
                         )
@@ -483,6 +515,17 @@ struct AetheriumView: View {
                                 .controlSize(.small)
                                 .disabled(vm.isGenerating)
                                 .help("コンテキストをクリア（会話履歴はそのまま残ります）")
+                                Divider().frame(height: 16).padding(.horizontal, 2)
+                                Menu {
+                                    Button("Markdown (.md)") { saveMarkdown() }
+                                    Button("PDF (.pdf)") { savePDF() }
+                                } label: {
+                                    Image(systemName: "square.and.arrow.down")
+                                }
+                                .menuStyle(.borderlessButton)
+                                .fixedSize()
+                                .disabled(vm.isGenerating || !vm.messages.contains { $0.role == "user" })
+                                .help("会話ログを保存（Markdown / PDF）")
                                 Divider().frame(height: 16).padding(.horizontal, 2)
                                 Button(action: { withAnimation { inputText = ""; vm.resetSession() } }) { Text("Exit").fontWeight(.medium).foregroundColor(.red) }.buttonStyle(.bordered).controlSize(.small)
                                 Spacer().frame(width: 6)

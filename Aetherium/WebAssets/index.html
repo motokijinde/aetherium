@@ -197,6 +197,14 @@
   .system { display: flex; align-items: center; gap: 8px; justify-content: center; padding: 4px 24px; }
   .system .line { flex: 1; height: 0.5px; background: rgba(127,127,127,0.3); }
   .system .txt { font-size: 10px; color: #8e8e93; white-space: nowrap; }
+  /* ===== PDF出力時（操作ボタンを隠し、背景を不透明にする） ===== */
+  body.exporting { background: #ffffff; }
+  body.exporting.dark { background: #1e1e1e; }
+  body.exporting .act-btn,
+  body.exporting .ver-nav,
+  body.exporting .cc-btns { display: none; }
+  /* 思考プロセスはスクロール枠で途切れるため、出力時は全文を表示する。 */
+  body.exporting .think-body { max-height: none; overflow: visible; }
 </style>
 </head>
 <body>
@@ -402,9 +410,17 @@ function decorateCodeBlocks(root) {
   }
 }
 
-// メッセージ操作の「Markdownで保存」ボタン → 本文(生Markdown)を message.md として保存。
+// 現在時刻を yyyyMMdd_HHmmss 形式の文字列にする（保存ファイル名の既定値用）。
+function nowStamp() {
+  var d = new Date();
+  function p(n) { return String(n).padStart(2, "0"); }
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "_" +
+         p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
+// メッセージ操作の「Markdownで保存」ボタン → 本文(生Markdown)を 日付時刻付きで保存。
 function saveMessage(btn) {
-  try { saveFile("message.md", decodeB64(btn.getAttribute("data-md"))); }
+  try { saveFile("メッセージ_" + nowStamp() + ".md", decodeB64(btn.getAttribute("data-md"))); }
   catch (e) {}
 }
 

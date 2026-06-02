@@ -25,6 +25,8 @@ struct ConversationWebView: NSViewRepresentable {
     let userName: String
     // 末尾以外の変更（過去の版切替）で全再描画させるためのトークン。
     let revision: Int
+    // PDF出力のため live な WKWebView を登録するブリッジ。
+    let exporter: ConversationExporter
     let onRegenerate: (UUID) -> Void
     let onSelectVariant: (UUID, Int) -> Void
 
@@ -48,6 +50,7 @@ struct ConversationWebView: NSViewRepresentable {
             ?? Bundle.main.url(forResource: "index", withExtension: "html") {
             webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         }
+        exporter.webView = webView
         return webView
     }
 
