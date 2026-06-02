@@ -37,8 +37,8 @@
   .msg.user .avatar { background-color: #0a84ff; background-image: url("avatar-user.png"); }
 
   .main { position: relative; display: flex; flex-direction: column; gap: 4px; max-width: min(720px, 78vw); min-width: 0; }
-  /* AI側: row(アバター+吹き出し) と統計チップ・コピーを束ねる器。幅は吹き出し幅にフィット。
-     チップを row の外に置くことで、アバターは吹き出し下端に固定されたまま（チップに引っ張られない）。 */
+  /* AI側: row(アバター+吹き出し) と操作ボタン・統計チップを束ねる器。幅は吹き出し幅にフィット。
+     ボタン・チップを row の外に置くことで、アバターは吹き出し下端に固定されたまま（引っ張られない）。 */
   .cluster { position: relative; display: flex; flex-direction: column; gap: 4px; width: fit-content; max-width: 100%; min-width: 0; }
   .msg.user .main { align-items: flex-end; }
   .label { font-size: 10px; font-weight: 700; color: #8e8e93; }
@@ -48,16 +48,14 @@
   .label .model { font-weight: 400; opacity: 0.72; }
 
   /* ===== メッセージ操作ボタン（コピー等） ===== */
-  /* .main 内に置き、user は align-items:flex-end で右寄せになる。普段は隠してホバーで表示。 */
-  /* position:absolute で .main に対して浮かせる。レイアウトの流れから外れるので、
-     ホバーで出ても下のメッセージや統計チップ・アバターを一切ずらさない。
-     AI(assistant)は吹き出し左下（チップは右寄せ）、ユーザーは吹き出し右下に表示。 */
-  .actions { position: absolute; display: none; gap: 2px; }
-  /* AI: cluster 基準で吹き出し左下（left:42px = アバター32+間隔10、吹き出し左端の位置）。 */
-  .msg.assistant .actions { left: 42px; bottom: 0; }
-  /* ユーザー: main 基準で吹き出し右下。 */
-  .msg.user .actions { right: 0; top: 100%; }
-  .msg:hover .actions { display: flex; }
+  /* 普段は隠してホバーで表示。AI は吹き出し直下の行に左寄せで置き、その下に統計チップ行が続く。
+     visibility:hidden で隠すので場所は常に確保され、ホバーで出ても他のメッセージはずれない。 */
+  .actions { display: flex; gap: 2px; visibility: hidden; }
+  .msg:hover .actions { visibility: visible; }
+  /* AI: 吹き出し左端（アバター32+間隔10=42px）に左揃え。 */
+  .msg.assistant .actions { padding-left: 42px; }
+  /* ユーザー: main 基準で吹き出し右下に絶対配置（統計が無いので重ならない）。 */
+  .msg.user .actions { position: absolute; right: 0; top: 100%; }
   .act-btn {
     display: inline-flex; align-items: center; justify-content: center;
     width: 24px; height: 24px; padding: 0; border: none; background: transparent;
@@ -146,9 +144,8 @@
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
   /* ===== 統計チップ ===== */
-  .stats { display: flex; gap: 4px; margin-top: 2px; flex-wrap: wrap; justify-content: flex-end; }
-  /* 統計が無いメッセージでも、コピー/保存ボタン用の帯を確保（吹き出しへの重なり防止）。 */
-  .stats:empty { min-height: 16px; }
+  /* 操作ボタン行の下に、同じく吹き出し左端（42px）から左寄せで並べる。 */
+  .stats { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-start; padding-left: 42px; }
   .chip {
     font-size: 8px; font-family: ui-monospace, Menlo, monospace; color: #8e8e93;
     background: rgba(127,127,127,0.12); padding: 3px 6px; border-radius: 6px; white-space: nowrap;
@@ -534,11 +531,10 @@ function bubbleHTML(m, idx, isLast) {
     '</div>';
   }
 
-  // AI: 統計チップ(右寄せ)とコピー(左下)を cluster でまとめる。統計を row の外に置くことで、
-  // アバターが統計に引っ張られず吹き出し下端に固定される。
+  // AI: row(アバター+吹き出し) の下に、統計チップ行 → 操作ボタン行 の順で縦に並べる
+  // （どちらも吹き出し左端に左寄せ）。これらを row の外に出すことでアバターが下端固定される。
   // 思考プロセスは本文の上、検索ソース（根拠）は本文の下に折りたたみで置く。
-  // 統計が無いメッセージ（定型あいさつ等）でも、左下のコピー/保存ボタンが吹き出しに
-  // 重ならないよう、同じ高さの空き帯を確保する。
+  // ボタンは visibility:hidden で場所を確保するので、ホバーで出ても他のメッセージはずれない。
   var statsBlock = (m.content && m.stats) ? statsHTML(m.stats) : (m.content ? '<div class="stats"></div>' : "");
   var srcs = sourcesHTML(m.searchSources);
   var thinkBlock = thinkingHTML(m, isLast);

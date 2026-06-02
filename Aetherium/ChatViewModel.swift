@@ -1144,6 +1144,12 @@ final class ChatViewModel: ObservableObject {
             // Attach search sources to assistant message
             let sources = await searchResultsCollector.sources
             await MainActor.run {
+                // 本文が空のまま終わった場合のフォールバック（モデルの空応答・ツール呼び出し失敗など）。
+                // ユーザーが停止ボタンで中断したとき（キャンセル）は出さない。
+                if !Task.isCancelled, let i = indexForAssistant(),
+                   self.messages[i].content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.messages[i].content = "⚠️ 回答が空のまま終了しました。もう一度お試しください（「再思考」ボタンで再生成できます）。"
+                }
                 if !sources.isEmpty, let i = indexForAssistant() {
                     self.messages[i].searchSources = sources
                 }
