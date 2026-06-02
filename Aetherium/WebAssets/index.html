@@ -63,6 +63,15 @@
   }
   .act-btn:hover { background: rgba(127,127,127,0.18); color: inherit; }
   .act-btn.copied { color: #34c759; }
+  /* 再思考の版ナビ（‹ 2 / 3 ›）。 */
+  .ver-nav { display: inline-flex; align-items: center; }
+  .ver-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 24px; padding: 0; border: none; background: transparent;
+    cursor: pointer; color: #8e8e93; border-radius: 6px; font-size: 15px; line-height: 1;
+  }
+  .ver-btn:hover { background: rgba(127,127,127,0.18); color: inherit; }
+  .ver-idx { font-size: 11px; color: #8e8e93; min-width: 28px; text-align: center; user-select: none; }
 
   .bubble {
     /* 中身の幅に合わせる（ラベル幅へ引き伸ばされない）。長文は最大幅で折り返す。ユーザー・アシスタント共通。 */
@@ -263,6 +272,7 @@ var ICON_COPY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" str
 var ICON_CHECK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 var ICON_DOWNLOAD = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
 var ICON_CHEVRON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+var ICON_REGEN = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
 
 // Swift(NSSavePanel)へ {filename, content} を渡して保存する。
 function saveFile(filename, content) {
@@ -393,7 +403,7 @@ function attachmentsHTML(m) {
 }
 
 // 吹き出し下の操作ボタン群。生テキスト(Markdown)は data-md に base64 で持たせる。
-function actionsHTML(m) {
+function actionsHTML(m, isLast) {
   if (!m.content) return "";
   var md = encodeB64(m.content);
   var copyBtn = '<button class="act-btn" type="button" title="コピー" onclick="copyMessage(this)" data-md="' + md + '">' + ICON_COPY + '</button>';
@@ -401,7 +411,27 @@ function actionsHTML(m) {
   var saveBtn = (m.role === "assistant")
     ? '<button class="act-btn" type="button" title="Markdownで保存" onclick="saveMessage(this)" data-md="' + md + '">' + ICON_DOWNLOAD + '</button>'
     : '';
-  return '<div class="actions">' + copyBtn + saveBtn + '</div>';
+  // 再思考は最後のAI回答のみ。版ナビは複数版を持つメッセージ（過去の回答含む）に出す。
+  var regenBtn = (m.role === "assistant" && isLast)
+    ? '<button class="act-btn" type="button" title="再思考" onclick="regenerateMessage(this)" data-id="' + escapeAttr(m.id) + '">' + ICON_REGEN + '</button>'
+    : '';
+  var nav = (m.variantCount && m.variantCount > 1)
+    ? '<span class="ver-nav">' +
+        '<button class="ver-btn" type="button" title="前の回答" onclick="selectVariant(this,-1)" data-id="' + escapeAttr(m.id) + '">‹</button>' +
+        '<span class="ver-idx">' + ((m.variantIndex || 0) + 1) + ' / ' + m.variantCount + '</span>' +
+        '<button class="ver-btn" type="button" title="次の回答" onclick="selectVariant(this,1)" data-id="' + escapeAttr(m.id) + '">›</button>' +
+      '</span>'
+    : '';
+  return '<div class="actions">' + copyBtn + saveBtn + regenBtn + nav + '</div>';
+}
+
+// 再思考(↻)ボタン押下 → SwiftへメッセージIDを渡す。
+function regenerateMessage(btn) {
+  try { window.webkit.messageHandlers.regenerate.postMessage(btn.getAttribute("data-id")); } catch (e) {}
+}
+// 版ナビ(‹ ›)押下 → Swiftへ {id, dir} を渡す（dir: -1=前 / +1=次）。
+function selectVariant(btn, dir) {
+  try { window.webkit.messageHandlers.selectVariant.postMessage({ id: btn.getAttribute("data-id"), dir: dir }); } catch (e) {}
 }
 
 // コピーボタン押下 → Swift(NSPasteboard)へ生テキストを渡し、一時的に✓表示。
@@ -467,7 +497,7 @@ function bubbleHTML(m, idx, isLast) {
   var inner = loading
     ? '<div class="dots"><span></span><span></span><span></span></div>'
     : '<div class="content"></div>';
-  var actions = (loading || streaming) ? '' : actionsHTML(m);
+  var actions = (loading || streaming) ? '' : actionsHTML(m, isLast);
 
   if (isUser) {
     // ユーザー: 統計なし。コピーは main 基準で吹き出し右下に絶対配置（従来通り）。

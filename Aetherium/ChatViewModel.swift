@@ -91,6 +91,8 @@ final class ChatViewModel: ObservableObject {
     @Published var attachmentError: String? = nil
     /// 現在のコンテキストにやり取りがあるか（Web検索トグルの切替可否に使用）。
     @Published var contextHasExchange: Bool = false
+    // 末尾以外のメッセージ（過去の版切替など）を変更したとき、WebViewへ全再描画を促すためのトークン。
+    @Published var chatRevision: Int = 0
     private let estimatedContextCharLimit = 8192  // ~4096 tokens * 2 chars/token
     private let searchResultsCollector = SearchResultsCollector()
     private var ollamaContextStartIndex: Int = 0
@@ -551,17 +553,102 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Regenerate / Variants
+
+    private func variantSnapshot(_ m: Message) -> MessageVariant {
+        MessageVariant(content: m.content, thinking: m.thinking, stats: m.stats, searchSources: m.searchSources)
+    }
+
+    /// 生成完了時に、現在の表示中フィールドをアクティブな版へ確定保存する（版nav有り時のみ）。
+    private func finalizeVariant(assistantID: UUID) {
+        guard let i = messages.firstIndex(where: { $0.id == assistantID }),
+              messages[i].variants != nil,
+              let a = messages[i].activeVariant else { return }
+        messages[i].variants![a] = variantSnapshot(messages[i])
+    }
+
+    /// 最後のAI回答を再思考する。古い回答は版として保持し、新しい版を生成・表示する。
+    func regenerate(messageID: UUID) {
+        guard !isGenerating else { return }
+        guard let idx = messages.firstIndex(where: { $0.id == messageID }),
+              messages[idx].role == "assistant", idx > 0 else { return }
+        stopGeneration()
+
+        // 初回再思考時は現在の回答を版0として退避。以降は現在の表示版を上書き保存する。
+        if messages[idx].variants == nil {
+            messages[idx].variants = [variantSnapshot(messages[idx])]
+            messages[idx].activeVariant = 0
+        } else if let a = messages[idx].activeVariant {
+            messages[idx].variants![a] = variantSnapshot(messages[idx])
+        }
+        // 新しい空の版を追加してアクティブにし、表示フィールドをクリア（生成で埋める）。
+        messages[idx].variants!.append(MessageVariant(content: "", thinking: nil, stats: nil, searchSources: nil))
+        messages[idx].activeVariant = messages[idx].variants!.count - 1
+        messages[idx].content = ""
+        messages[idx].thinking = nil
+        messages[idx].stats = nil
+        messages[idx].searchSources = nil
+
+        if aiProvider == .appleIntelligence {
+            guard foundationSession != nil else { return }
+            let userText = messages[idx - 1].content
+            // Apple のセッションは内部に履歴を保持するため、末尾の応答を外したセッションへ作り直して再プロンプトする。
+            let session = makeRegenSession()
+            foundationSession = session
+            runAppleGeneration(text: userText, assistantID: messageID, session: session, retryAfterTrim: true)
+        } else {
+            // Ollama は毎回 messages から履歴を再構築するため、空にした placeholder で再実行するだけでよい。
+            runOllamaGeneration(assistantID: messageID)
+        }
+    }
+
+    /// 版を切り替える（dir: -1=前 / +1=次）。表示中フィールドを該当版へ差し替える。
+    func selectVariant(messageID: UUID, dir: Int) {
+        guard !isGenerating else { return }
+        guard let i = messages.firstIndex(where: { $0.id == messageID }),
+              let variants = messages[i].variants, variants.count > 1 else { return }
+        let cur = messages[i].activeVariant ?? (variants.count - 1)
+        let next = max(0, min(variants.count - 1, cur + dir))
+        guard next != cur else { return }
+        // 離脱前に現在の表示内容を現版へ保存（途中キャンセル分などの取りこぼし防止）。
+        messages[i].variants![cur] = variantSnapshot(messages[i])
+        let v = messages[i].variants![next]
+        messages[i].activeVariant = next
+        messages[i].content = v.content
+        messages[i].thinking = v.thinking
+        messages[i].stats = v.stats
+        messages[i].searchSources = v.searchSources
+        // 末尾以外の版切替は末尾シグネチャが変わらず再描画されないため、全再描画を促す。
+        if i != messages.count - 1 { chatRevision += 1 }
+    }
+
+    /// 末尾の応答（と直前のプロンプト）をトランスクリプトから外したセッションを作る（Apple用・再思考のため）。
+    private func makeRegenSession() -> LanguageModelSession {
+        guard let current = foundationSession else { return makeSession() }
+        var entries = Array(current.transcript)
+        if let last = entries.last, case .response = last { entries.removeLast() }
+        if let last = entries.last, case .prompt = last { entries.removeLast() }
+        let trimmed = Transcript(entries: entries)
+        return webSearchEnabled
+            ? LanguageModelSession(tools: [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL)], transcript: trimmed)
+            : LanguageModelSession(transcript: trimmed)
+    }
+
     // MARK: - Apple Intelligence
 
     private func sendMessageApple(_ text: String, retryAfterTrim: Bool = false) {
         guard let session = foundationSession else { return }
         stopGeneration()
-        isGenerating = true
-        let audioSessionID = UUID()
-        currentAudioSessionID = audioSessionID
         let assistantID = UUID()
         if !retryAfterTrim { messages.append(Message(role: "user", content: text)) }
         messages.append(Message(id: assistantID, role: "assistant", content: ""))
+        runAppleGeneration(text: text, assistantID: assistantID, session: session, retryAfterTrim: retryAfterTrim)
+    }
+
+    private func runAppleGeneration(text: String, assistantID: UUID, session: LanguageModelSession, retryAfterTrim: Bool) {
+        isGenerating = true
+        let audioSessionID = UUID()
+        currentAudioSessionID = audioSessionID
 
         generatingTask = Task {
             await searchResultsCollector.reset()
@@ -669,6 +756,7 @@ final class ChatViewModel: ObservableObject {
             }
 
             await MainActor.run {
+                self.finalizeVariant(assistantID: assistantID)
                 self.isGenerating = false
                 self.generatingTask = nil
                 self.updateContextUsage()
@@ -735,14 +823,18 @@ final class ChatViewModel: ObservableObject {
 
     private func sendMessageOllama(_ text: String) {
         stopGeneration()
-        isGenerating = true
-        let audioSessionID = UUID()
-        currentAudioSessionID = audioSessionID
         let assistantID = UUID()
         let atts = pendingAttachments
         pendingAttachments = []
         messages.append(Message(role: "user", content: text, attachments: atts.isEmpty ? nil : atts))
         messages.append(Message(id: assistantID, role: "assistant", content: ""))
+        runOllamaGeneration(assistantID: assistantID)
+    }
+
+    private func runOllamaGeneration(assistantID: UUID) {
+        isGenerating = true
+        let audioSessionID = UUID()
+        currentAudioSessionID = audioSessionID
 
         generatingTask = Task {
             await searchResultsCollector.reset()
@@ -972,6 +1064,7 @@ final class ChatViewModel: ObservableObject {
                 if !sources.isEmpty, let i = indexForAssistant() {
                     self.messages[i].searchSources = sources
                 }
+                self.finalizeVariant(assistantID: assistantID)
                 // KVキャッシュヒット時は累積+completion、再評価時は実測値(roundTotalTokens)、どちらか大きい方
                 self.ollamaContextUsedTokens = max(
                     self.ollamaContextUsedTokens + roundCompletionTokens,

@@ -340,7 +340,10 @@ struct AetheriumView: View {
                             dark: colorScheme == .dark,
                             isGenerating: vm.isGenerating,
                             speakerName: vm.currentSpeakerName,
-                            modelName: vm.activeModelLabel
+                            modelName: vm.activeModelLabel,
+                            revision: vm.chatRevision,
+                            onRegenerate: { vm.regenerate(messageID: $0) },
+                            onSelectVariant: { vm.selectVariant(messageID: $0, dir: $1) }
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         VStack(spacing: 8) {

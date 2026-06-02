@@ -21,6 +21,10 @@ struct ConversationWebView: NSViewRepresentable {
     let isGenerating: Bool
     let speakerName: String
     let modelName: String
+    // 末尾以外の変更（過去の版切替）で全再描画させるためのトークン。
+    let revision: Int
+    let onRegenerate: (UUID) -> Void
+    let onSelectVariant: (UUID, Int) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -31,6 +35,9 @@ struct ConversationWebView: NSViewRepresentable {
         config.userContentController.add(context.coordinator, name: "copyToClipboard")
         // コードブロック・メッセージの保存ボタン → JS から {filename, content} を受け取って NSSavePanel へ。
         config.userContentController.add(context.coordinator, name: "saveFile")
+        // 再思考(↻)ボタン → メッセージIDを受け取り再生成。版ナビ(‹ ›) → {id, dir} を受け取り版切替。
+        config.userContentController.add(context.coordinator, name: "regenerate")
+        config.userContentController.add(context.coordinator, name: "selectVariant")
         let webView = ChatWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         // 背景を透過させて、SwiftUI 側の背景を見せる。
@@ -66,6 +73,7 @@ struct ConversationWebView: NSViewRepresentable {
         private var lastDark: Bool?
         private var lastSpeaker = "\u{1}"
         private var lastModel = "\u{1}"
+        private var lastRevision = -1
         private var lastLastSig = "\u{1}\u{1}"
         private var pending: DispatchWorkItem?
         private var lastRender = Date.distantPast
@@ -82,7 +90,7 @@ struct ConversationWebView: NSViewRepresentable {
             parent = newParent
             guard loaded else { return }
             // 件数・テーマ・話者の変化は構造変化 → 全再描画。
-            if parent.messages.count != lastCount || parent.dark != lastDark || parent.speakerName != lastSpeaker || parent.modelName != lastModel {
+            if parent.messages.count != lastCount || parent.dark != lastDark || parent.speakerName != lastSpeaker || parent.modelName != lastModel || parent.revision != lastRevision {
                 fullReload(webView)
                 return
             }
@@ -99,6 +107,7 @@ struct ConversationWebView: NSViewRepresentable {
             lastDark = parent.dark
             lastSpeaker = parent.speakerName
             lastModel = parent.modelName
+            lastRevision = parent.revision
             lastLastSig = parent.lastSignature()
             pending?.cancel()
             guard let msgsB64 = ConversationWebView.encodeBase64(parent.messages) else { return }
@@ -156,6 +165,14 @@ struct ConversationWebView: NSViewRepresentable {
                 if panel.runModal() == .OK, let url = panel.url {
                     try? content.write(to: url, atomically: true, encoding: .utf8)
                 }
+            case "regenerate":
+                guard let idStr = message.body as? String, let id = UUID(uuidString: idStr) else { return }
+                parent.onRegenerate(id)
+            case "selectVariant":
+                guard let dict = message.body as? [String: Any],
+                      let idStr = dict["id"] as? String, let id = UUID(uuidString: idStr),
+                      let dir = dict["dir"] as? Int else { return }
+                parent.onSelectVariant(id, dir)
             default:
                 return
             }
