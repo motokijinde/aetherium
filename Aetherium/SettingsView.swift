@@ -86,6 +86,17 @@ struct SettingsView: View {
     private var instructionsTab: some View {
         Form {
             Section {
+                Picker("応答言語", selection: $vm.responseLanguage) {
+                    ForEach(ResponseLanguage.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            } header: {
+                Text("応答言語")
+            } footer: {
+                Text("AI が返答に使う言語。システム指示は常に英語で送られます（トークン節約・指示追従の安定のため）。")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            Section {
                 TextField("あなたの名前", text: $vm.userName, prompt: Text("未設定（「あなた」と表示）"))
             } header: {
                 Text("あなたの呼び名")

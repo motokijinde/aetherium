@@ -5,6 +5,20 @@ enum AIProvider: String, CaseIterable {
     case appleIntelligence = "Apple Intelligence"
 }
 
+/// AIの応答言語。システムプロンプト先頭に「この言語で答えて」を英語で注入する。
+enum ResponseLanguage: String, CaseIterable, Identifiable {
+    case japanese = "日本語"
+    case english = "English"
+    var id: String { rawValue }
+    /// システムプロンプトに入れる応答言語指示（英語で記述）。
+    var instruction: String {
+        switch self {
+        case .japanese: return "Always respond in Japanese."
+        case .english:  return "Always respond in English."
+        }
+    }
+}
+
 struct UsageStats: Codable {
     let promptTokens: Int
     let completionTokens: Int

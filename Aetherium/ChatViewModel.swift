@@ -11,28 +11,30 @@ import AppKit
 /// 対になっている「技術契約」なので、編集時は対応機能との整合に注意。
 enum Prompts {
     /// 常に適用するアプリ固有のシステム指示（KaTeX 表示・ファイル記法）。
+    /// トークン削減と小型モデルでの指示追従向上のため英語で記述する。
+    /// 応答言語は設定（`ResponseLanguage`）の指示をプロンプト先頭に別途注入する。
     static let appSystem = """
-    数式は KaTeX で表示されます。次のお作法に従ってください。
-    - ディスプレイ数式は $$ ... $$ で囲む
-    - インライン数式は \\( ... \\) で囲む（$ ... $ は使わない）
-    - 数式をコードブロック(```)で囲まない（そのまま文字列として表示されてしまう）
+    Mathematics is rendered with KaTeX. Follow these rules.
+    - Wrap display math in $$ ... $$
+    - Wrap inline math in \\( ... \\) (do not use $ ... $)
+    - Do not wrap math in a code block (```), or it will be shown as plain text.
 
-    ファイル・コード・データを作成・保存するよう求められたら、その内容は必ずコードフェンスで囲み、開始フェンスに「言語:ファイル名」を書くこと（例: ```python:main.py / ```csv:data.csv / ```json:config.json）。ファイル名は内容にふさわしい名前と拡張子にする。この「言語:ファイル名」表記は省略してはならない。
+    When asked to create or save a file, code, or data, always wrap the content in a code fence and write "language:filename" on the opening fence (e.g. ```python:main.py / ```csv:data.csv / ```json:config.json). Choose a filename and extension suitable for the content. This "language:filename" notation must never be omitted.
     """
 
     /// Web検索ツールを使うときの振る舞い指示。
-    static let webSearch = "Web検索ツールを使用する場合、検索結果のテキストをそのまま出力しないでください。検索結果を参照して内容を理解し、自分の言葉で簡潔に回答してください。"
+    static let webSearch = "When using the web search tool, do not output the raw search result text. Read and understand the results, then answer concisely in your own words."
 
     /// Web検索ツール（function calling）の説明文。
-    static let webSearchToolDescription = "SearXNGを使って最新のWeb情報を検索します。最新情報や時事問題について質問されたときに使用してください。"
+    static let webSearchToolDescription = "Searches the web for up-to-date information using SearXNG. Use it when asked about current events or the latest information."
 
     /// 呼び名が設定されているときに注入する、AI向けの呼びかけ指示。
     static func userName(_ name: String) -> String {
         """
-        # ユーザーについて
-        対話相手の名前は「\(name)」です。次の方針で接してください。
-        - 会話の自然な区切りで名前を呼び、親しみのある対話にする
-        - 敬称や呼び方（「さん」付け・呼び捨て・あだ名など）は固定せず、会話の雰囲気やこのあとの指示・ユーザーの希望に合わせて選ぶ
+        # About the user
+        The user's name is "\(name)". Follow these guidelines.
+        - Address them by name at natural points in the conversation to keep it friendly.
+        - Do not fix a single honorific or form of address; choose it based on the mood of the conversation and the user's later instructions or preferences.
         """
     }
 
@@ -103,6 +105,7 @@ final class ChatViewModel: ObservableObject {
     @Published var voiceEnabled: Bool = true { didSet { persist(voiceEnabled, "voiceEnabled") } }
     @Published var isFetching = false
     @Published var aiProvider: AIProvider = .ollama { didSet { persist(aiProvider.rawValue, "aiProvider"); pendingAttachments.removeAll() } }
+    @Published var responseLanguage: ResponseLanguage = .japanese { didSet { persist(responseLanguage.rawValue, "responseLanguage") } }
     @Published var appleIntelligenceError: String? = nil
     @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, "webSearchEnabled") } }
     @Published var thinkingEnabled: Bool = false { didSet { persist(thinkingEnabled, "thinkingEnabled") } }
@@ -235,6 +238,7 @@ final class ChatViewModel: ObservableObject {
         if d.object(forKey: "aetherium.speechSpeed") != nil { speechSpeed = d.double(forKey: "aetherium.speechSpeed") }
         if d.object(forKey: "aetherium.voiceEnabled") != nil { voiceEnabled = d.bool(forKey: "aetherium.voiceEnabled") }
         if let v = d.string(forKey: "aetherium.aiProvider"), let p = AIProvider(rawValue: v) { aiProvider = p }
+        if let v = d.string(forKey: "aetherium.responseLanguage"), let l = ResponseLanguage(rawValue: v) { responseLanguage = l }
         if d.object(forKey: "aetherium.webSearchEnabled") != nil { webSearchEnabled = d.bool(forKey: "aetherium.webSearchEnabled") }
         if d.object(forKey: "aetherium.thinkingEnabled") != nil { thinkingEnabled = d.bool(forKey: "aetherium.thinkingEnabled") }
         if let v = d.string(forKey: "aetherium.searxngURL"), !v.isEmpty { searxngURL = v }
@@ -295,7 +299,7 @@ final class ChatViewModel: ObservableObject {
     /// アプリのシステム指示・ユーザーのカスタム指示・Web検索用指示を結合した、セッションに渡す最終instructions。
     /// アプリのシステム指示が常に含まれるため必ず非nil。
     private var effectiveInstructions: String? {
-        var parts: [String] = [Prompts.appSystem]
+        var parts: [String] = [responseLanguage.instruction, Prompts.appSystem]
         if let nameInstr = userNameInstruction { parts.append(nameInstr) }
         if let instr = activeCustomInstruction { parts.append(instr) }
         if webSearchEnabled { parts.append(Prompts.webSearch) }
@@ -941,7 +945,7 @@ final class ChatViewModel: ObservableObject {
 
             // アプリのシステム指示（常に）＋ユーザーのカスタム指示 を1つのsystemにまとめて履歴の先頭へ差し込む
             // （画面表示用のお知らせsystemメッセージとは別管理）
-            var systemParts = [Prompts.appSystem]
+            var systemParts = [self.responseLanguage.instruction, Prompts.appSystem]
             if let nameInstr = self.userNameInstruction { systemParts.append(nameInstr) }
             if let instr = self.activeCustomInstruction { systemParts.append(instr) }
             history.insert(["role": "system", "content": systemParts.joined(separator: "\n\n")], at: 0)
