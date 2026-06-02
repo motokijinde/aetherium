@@ -54,8 +54,10 @@ struct Message: Identifiable, Codable {
     // WebViewへは本体を送らず件数(variantCount)とindex(variantIndex)だけencodeする（ペイロード軽量化）。
     var variants: [MessageVariant]?
     var activeVariant: Int?
+    // 発言時刻。WebViewのラベル横に「X月X日 HH:MM」で表示する。
+    var date: Date
 
-    init(id: UUID = UUID(), role: String, content: String, thinking: String? = nil, stats: UsageStats? = nil, searchSources: [SearchSource]? = nil, attachments: [Attachment]? = nil, variants: [MessageVariant]? = nil, activeVariant: Int? = nil) {
+    init(id: UUID = UUID(), role: String, content: String, thinking: String? = nil, stats: UsageStats? = nil, searchSources: [SearchSource]? = nil, attachments: [Attachment]? = nil, variants: [MessageVariant]? = nil, activeVariant: Int? = nil, date: Date = Date()) {
         self.id = id
         self.role = role
         self.content = content
@@ -65,6 +67,7 @@ struct Message: Identifiable, Codable {
         self.attachments = attachments
         self.variants = variants
         self.activeVariant = activeVariant
+        self.date = date
     }
 
     init(from decoder: Decoder) throws {
@@ -78,6 +81,7 @@ struct Message: Identifiable, Codable {
         self.attachments = try c.decodeIfPresent([Attachment].self, forKey: .attachments)
         self.variants = nil
         self.activeVariant = nil
+        self.date = try c.decodeIfPresent(Date.self, forKey: .date) ?? Date()
     }
 
     func encode(to encoder: Encoder) throws {
@@ -93,9 +97,10 @@ struct Message: Identifiable, Codable {
             try c.encode(variants.count, forKey: .variantCount)
             try c.encode(activeVariant ?? (variants.count - 1), forKey: .variantIndex)
         }
+        try c.encode(date, forKey: .date)
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, content, thinking, stats, searchSources, attachments, variantCount, variantIndex }
+    private enum CodingKeys: String, CodingKey { case id, role, content, thinking, stats, searchSources, attachments, variantCount, variantIndex, date }
 }
 
 /// メッセージに添付されたファイル/画像。

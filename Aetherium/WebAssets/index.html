@@ -42,6 +42,8 @@
   .cluster { position: relative; display: flex; flex-direction: column; gap: 4px; width: fit-content; max-width: 100%; min-width: 0; }
   .msg.user .main { align-items: flex-end; }
   .label { font-size: 10px; font-weight: 700; color: #8e8e93; }
+  /* 名前の横の発言時刻（X月X日 HH:MM）。細字・やや薄め。 */
+  .label .time { font-weight: 400; opacity: 0.75; margin-left: 6px; }
   /* 話者名に併記するモデル名は、細字＋やや薄めにしてメリハリを付ける。 */
   .label .model { font-weight: 400; opacity: 0.72; }
 
@@ -145,6 +147,8 @@
 
   /* ===== 統計チップ ===== */
   .stats { display: flex; gap: 4px; margin-top: 2px; flex-wrap: wrap; justify-content: flex-end; }
+  /* 統計が無いメッセージでも、コピー/保存ボタン用の帯を確保（吹き出しへの重なり防止）。 */
+  .stats:empty { min-height: 16px; }
   .chip {
     font-size: 8px; font-family: ui-monospace, Menlo, monospace; color: #8e8e93;
     background: rgba(127,127,127,0.12); padding: 3px 6px; border-radius: 6px; white-space: nowrap;
@@ -163,6 +167,14 @@
     white-space: pre-wrap; word-break: break-word; font-size: 11.5px; line-height: 1.5;
     color: #8e8e93; margin-top: 4px; max-height: 260px; overflow-y: auto;
   }
+  /* macOS の自動消滅オーバーレイだとノード再生成で消えすぎるため、
+     思考枠は常時表示のカスタムスクロールバーにする。 */
+  .think-body::-webkit-scrollbar { width: 8px; }
+  .think-body::-webkit-scrollbar-track { background: transparent; }
+  .think-body::-webkit-scrollbar-thumb {
+    background: rgba(127,127,127,0.45); border-radius: 4px;
+  }
+  .think-body::-webkit-scrollbar-thumb:hover { background: rgba(127,127,127,0.65); }
 
   /* ===== 検索ソース（折りたたみ。思考プロセスと同じ開閉UI） ===== */
   .sources { margin: 6px 0 0; }
@@ -259,7 +271,16 @@ function fillContent(el, mdText) {
 }
 
 // ===== 吹き出しHTML生成 =====
-var state = { dark: false, generating: false, speaker: "AI", model: "" };
+var state = { dark: false, generating: false, speaker: "AI", model: "", userName: "あなた" };
+
+// 発言時刻を "X月X日 HH:MM" に整形する（epochミリ秒を受け取る）。
+function formatTime(ms) {
+  if (!ms) return "";
+  var d = new Date(ms);
+  if (isNaN(d.getTime())) return "";
+  var time = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+  return (d.getMonth() + 1) + "月" + d.getDate() + "日 " + time;
+}
 
 // AIの話者ラベル。モデル名があれば "話者 (モデル)" の形で、モデル部は細字spanにする。
 function speakerLabelHTML() {
@@ -403,7 +424,7 @@ function attachmentsHTML(m) {
 }
 
 // 吹き出し下の操作ボタン群。生テキスト(Markdown)は data-md に base64 で持たせる。
-function actionsHTML(m, isLast) {
+function actionsHTML(m, idx, isLast) {
   if (!m.content) return "";
   var md = encodeB64(m.content);
   var copyBtn = '<button class="act-btn" type="button" title="コピー" onclick="copyMessage(this)" data-md="' + md + '">' + ICON_COPY + '</button>';
@@ -411,8 +432,9 @@ function actionsHTML(m, isLast) {
   var saveBtn = (m.role === "assistant")
     ? '<button class="act-btn" type="button" title="Markdownで保存" onclick="saveMessage(this)" data-md="' + md + '">' + ICON_DOWNLOAD + '</button>'
     : '';
-  // 再思考は最後のAI回答のみ。版ナビは複数版を持つメッセージ（過去の回答含む）に出す。
-  var regenBtn = (m.role === "assistant" && isLast)
+  // 再思考は最後のAI回答のみ。idx>0（前にユーザー発言がある）＝Swift側のガード条件に合わせ、
+  // 定型あいさつ(idx 0)では機能しないため出さない。版ナビは複数版を持つメッセージに出す。
+  var regenBtn = (m.role === "assistant" && isLast && idx > 0)
     ? '<button class="act-btn" type="button" title="再思考" onclick="regenerateMessage(this)" data-id="' + escapeAttr(m.id) + '">' + ICON_REGEN + '</button>'
     : '';
   var nav = (m.variantCount && m.variantCount > 1)
@@ -489,7 +511,9 @@ function bubbleHTML(m, idx, isLast) {
       '<div class="line"></div><div class="txt">' + escapeHTML(m.content) + '</div><div class="line"></div></div>';
   }
   var isUser = m.role === "user";
-  var label = isUser ? "あなた" : speakerLabelHTML();
+  var label = isUser ? escapeHTML(state.userName || "あなた") : speakerLabelHTML();
+  var timeStr = formatTime(m.date);
+  if (timeStr) label += '<span class="time">' + timeStr + '</span>';
   // 本文も思考もまだ無いときだけローディングドットを出す（思考が来たら思考を見せる）。
   var loading = (!isUser && isLast && state.generating && !m.content && !m.thinking);
   // 生成中の末尾メッセージ（ストリーミング中）はコピーボタンを出さない。確定後に表示する。
@@ -497,7 +521,7 @@ function bubbleHTML(m, idx, isLast) {
   var inner = loading
     ? '<div class="dots"><span></span><span></span><span></span></div>'
     : '<div class="content"></div>';
-  var actions = (loading || streaming) ? '' : actionsHTML(m, isLast);
+  var actions = (loading || streaming) ? '' : actionsHTML(m, idx, isLast);
 
   if (isUser) {
     // ユーザー: 統計なし。コピーは main 基準で吹き出し右下に絶対配置（従来通り）。
@@ -513,7 +537,9 @@ function bubbleHTML(m, idx, isLast) {
   // AI: 統計チップ(右寄せ)とコピー(左下)を cluster でまとめる。統計を row の外に置くことで、
   // アバターが統計に引っ張られず吹き出し下端に固定される。
   // 思考プロセスは本文の上、検索ソース（根拠）は本文の下に折りたたみで置く。
-  var statsBlock = (m.content && m.stats) ? statsHTML(m.stats) : "";
+  // 統計が無いメッセージ（定型あいさつ等）でも、左下のコピー/保存ボタンが吹き出しに
+  // 重ならないよう、同じ高さの空き帯を確保する。
+  var statsBlock = (m.content && m.stats) ? statsHTML(m.stats) : (m.content ? '<div class="stats"></div>' : "");
   var srcs = sourcesHTML(m.searchSources);
   var thinkBlock = thinkingHTML(m, isLast);
   return '<div class="msg assistant" data-i="' + idx + '">' +
@@ -525,6 +551,23 @@ function bubbleHTML(m, idx, isLast) {
       '</div>' + statsBlock + actions +
     '</div>' +
     '</div>';
+}
+
+// 思考プロセス枠の下端追従フラグ。ユーザーが上にスクロールしたら止め、下端へ戻すと再開する。
+var thinkFollow = true;
+
+// 生成中、思考プロセス枠（内部スクロール）のスクロール位置を制御する。
+// updateLast はトークン毎にノードを作り直すため、追従中は下端へ、そうでなければ
+// 直前のスクロール位置（prevScroll）を復元して、ユーザーが読んでいる位置を保つ。
+function applyThinkScroll(node, prevScroll) {
+  if (!node) return;
+  var tb = node.querySelector(".think-body");
+  if (!tb) return;
+  tb.scrollTop = thinkFollow ? tb.scrollHeight : prevScroll;
+  // ユーザー操作で下端付近なら追従、離れたら停止（プログラム設定分も同じ判定で吸収）。
+  tb.addEventListener("scroll", function () {
+    thinkFollow = (tb.scrollTop + tb.clientHeight >= tb.scrollHeight - 8);
+  });
 }
 
 // 末尾メッセージのDOMノードに本文を流し込む（ローディング中は何もしない）。
@@ -539,32 +582,44 @@ function fillNode(node, m, streaming) {
 }
 
 // ===== 公開API（Swift から呼ぶ） =====
-function setMessages(msgsB64, dark, generating, speakerB64, modelB64) {
+function setMessages(msgsB64, dark, generating, speakerB64, modelB64, userB64) {
+  if (generating && !state.generating) thinkFollow = true;  // 新しい生成の開始時は下端追従に戻す
   state.dark = dark;
   state.generating = generating;
   state.speaker = speakerB64 ? decodeB64(speakerB64) : "AI";
   state.model = modelB64 ? decodeB64(modelB64) : "";
+  state.userName = userB64 ? decodeB64(userB64) : "あなた";
   document.body.className = dark ? "dark" : "light";
   var msgs = JSON.parse(decodeB64(msgsB64));
   var conv = document.getElementById("conversation");
+  // innerHTML 全置換で消える前に、最後の思考枠のスクロール位置を控える。
+  var prevTbs = conv.querySelectorAll(".think-body");
+  var prevScroll = prevTbs.length ? prevTbs[prevTbs.length - 1].scrollTop : 0;
   conv.innerHTML = msgs.map(function (m, i) { return bubbleHTML(m, i, i === msgs.length - 1); }).join("");
   msgs.forEach(function (m, i) {
     var streaming = (m.role !== "user" && i === msgs.length - 1 && state.generating);
-    fillNode(conv.querySelector('[data-i="' + i + '"]'), m, streaming);
+    var node = conv.querySelector('[data-i="' + i + '"]');
+    fillNode(node, m, streaming);
+    if (streaming) applyThinkScroll(node, prevScroll);
   });
   scrollToBottom(true);
 }
 
 function updateLast(msgB64, idx, generating) {
+  if (generating && !state.generating) thinkFollow = true;  // 新しい生成の開始時は下端追従に戻す
   state.generating = generating;
   var m = JSON.parse(decodeB64(msgB64));
   var conv = document.getElementById("conversation");
   var old = conv.querySelector('[data-i="' + idx + '"]');
+  // ノード再生成で内部スクロールが先頭へ戻るため、直前の思考枠の位置を控えておく。
+  var oldTb = old ? old.querySelector(".think-body") : null;
+  var prevScroll = oldTb ? oldTb.scrollTop : 0;
   var tmp = document.createElement("div");
   tmp.innerHTML = bubbleHTML(m, idx, true);
   var fresh = tmp.firstElementChild;
   if (old) { old.replaceWith(fresh); } else { conv.appendChild(fresh); }
   fillNode(fresh, m, generating);
+  if (generating) applyThinkScroll(fresh, prevScroll);
   scrollToBottom(false);
 }
 

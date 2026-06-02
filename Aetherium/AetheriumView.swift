@@ -2,10 +2,49 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+/// 入力欄下のアイコンチップ（検索・思考・音声・添付・画像）の共通UI。
+/// ON=青背景、OFF=薄背景、無効=フェードで状態を示す。マウスオーバーで背景を濃くして押せる感を出し、
+/// `.help()` が出ない環境向けに NSView の toolTip（`Tooltip`）で説明をホバー表示する。
+private struct ChipButton: View {
+    let icon: String
+    var isOn: Bool = false
+    var isEnabled: Bool = true
+    let help: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 13, weight: .medium))
+                .frame(width: 18, height: 18)  // アイコンの大小でボタンの縦横がブレないよう固定
+                .foregroundStyle(isOn ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color.secondary))
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Capsule().fill(fillColor))
+                .overlay(
+                    Capsule().strokeBorder(isOn ? Color.blue.opacity(0.45) : Color.clear, lineWidth: 1)
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.4)
+        .onHover { hovering = $0 && isEnabled }
+        .background(Tooltip(help))
+    }
+
+    /// ホバー時は不透明度を上げて「押せる」感を出す。
+    private var fillColor: Color {
+        if isOn { return Color.blue.opacity(hovering ? 0.28 : 0.15) }
+        return Color.primary.opacity(hovering ? 0.14 : 0.06)
+    }
+}
+
 // ⌘V を横取りし、クリップボードに画像があれば添付に回す NSTextView。
 // onPasteImage が true を返したら（画像を消費したら）テキスト貼り付けは行わない。
 final class PastableTextView: NSTextView {
     var onPasteImage: (() -> Bool)?
+    /// 未入力時に薄く表示するプレースホルダ。IME変換中は string にマーク中テキストが入るため自動で隠れる。
+    var placeholderString: String = "" { didSet { needsDisplay = true } }
     // isRichText=false だとテキスト型しか受け付けず、画像のみのクリップボードでは
     // Paste メニュー・⌘V が無効化され paste(_:) も呼ばれない。画像型を受理対象に加えて有効化する。
     override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
@@ -15,6 +54,19 @@ final class PastableTextView: NSTextView {
         if onPasteImage?() == true { return }
         super.paste(sender)
     }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !hasMarkedText(), !placeholderString.isEmpty else { return }
+        // 実テキストと同じ typingAttributes（フォント・段落スタイル）を使い、色だけ薄くする。
+        // 行頭の起点（インセット＋行パディング）に合わせて描くことでベースラインが一致する。
+        var attrs = typingAttributes
+        attrs[.foregroundColor] = NSColor.placeholderTextColor
+        if attrs[.font] == nil { attrs[.font] = font ?? .systemFont(ofSize: NSFont.systemFontSize) }
+        let x = textContainerInset.width + (textContainer?.lineFragmentPadding ?? 0)
+        let rect = NSRect(x: x, y: textContainerInset.height,
+                          width: bounds.width - x, height: bounds.height - textContainerInset.height)
+        placeholderString.draw(in: rect, withAttributes: attrs)
+    }
 }
 
 // 複数行入力欄（NSTextView ラッパー）
@@ -23,6 +75,7 @@ final class PastableTextView: NSTextView {
 struct MultilineInputField: NSViewRepresentable {
     @Binding var text: String
     @Binding var height: CGFloat
+    var placeholder: String = ""
     var maxLines: Int = 5
     var onSubmit: () -> Void
     /// クリップボード画像を消費したら true（テキスト貼り付けを抑止する）。
@@ -37,6 +90,7 @@ struct MultilineInputField: NSViewRepresentable {
 
         let textView = PastableTextView()
         textView.onPasteImage = onPasteImage
+        textView.placeholderString = placeholder
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.font = .systemFont(ofSize: NSFont.systemFontSize)
@@ -62,8 +116,12 @@ struct MultilineInputField: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.documentView as? NSTextView else { return }
-        if textView.string != text {
+        guard let textView = nsView.documentView as? PastableTextView else { return }
+        textView.placeholderString = placeholder
+        // IME変換中（マーク中テキストあり）は string を触らない。会話中はストリーミングで
+        // 頻繁に updateNSView が走るため、ここで上書きすると変換中の文字が消えて入力不能になる。
+        // それ以外で内容がズレているときだけ同期（送信後のクリア等の外部変更を反映）。
+        if !textView.hasMarkedText() && textView.string != text {
             textView.string = text
         }
         recalculateHeight(textView)
@@ -160,17 +218,8 @@ struct AetheriumView: View {
 
     /// 添付ボタン用の単発アクションチップ（既存トグルOFFと同系の見た目）。
     /// 生成中も「次の送信の準備」として押せるよう、常時有効。
-    @ViewBuilder
     private func actionChip(icon: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon).font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color.secondary)
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Capsule().fill(Color.primary.opacity(0.06)))
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .help(help)
+        ChipButton(icon: icon, help: help, action: action)
     }
 
     /// 入力欄の上に並ぶ添付プレビュー（×で個別削除）。
@@ -193,29 +242,9 @@ struct AetheriumView: View {
     }
 
     /// 入力欄下の機能トグル（検索・思考・音声）の共通チップUI。
-    /// ON=青背景、OFF=薄背景、無効=フェードで状態を示し、パディング＋contentShapeで当たり判定を広げる。
-    @ViewBuilder
-    private func toggleChip(icon: String, label: String, isOn: Bool, isEnabled: Bool,
+    private func toggleChip(icon: String, isOn: Bool, isEnabled: Bool,
                             help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: icon).font(.system(size: 13, weight: .medium))
-                Text(label).font(.system(size: 12, weight: .medium))
-            }
-            .foregroundStyle(isOn ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color.secondary))
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(
-                Capsule().fill(isOn ? Color.blue.opacity(0.15) : Color.primary.opacity(0.06))
-            )
-            .overlay(
-                Capsule().strokeBorder(isOn ? Color.blue.opacity(0.45) : Color.clear, lineWidth: 1)
-            )
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
-        .opacity(isEnabled ? 1 : 0.4)
-        .help(help)
+        ChipButton(icon: icon, isOn: isOn, isEnabled: isEnabled, help: help, action: action)
     }
 
     /// 🔍 トグルのツールチップ（無効理由を説明）。
@@ -304,10 +333,7 @@ struct AetheriumView: View {
 
                         VStack(spacing: 12) {
                             Button(action: {
-                                // Apple Intelligence は最新のカスタム指示を焼き込むためセッションを作り直す
-                                // （開始前は会話ゼロなので作り直しても何も失わない）。
-                                if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
-                                withAnimation(.spring()) { vm.isInSession = true }
+                                withAnimation(.spring()) { vm.startSession() }
                             }) {
                                 Text("Start Session").font(.headline).frame(width: 220, height: 40)
                             }
@@ -341,6 +367,7 @@ struct AetheriumView: View {
                             isGenerating: vm.isGenerating,
                             speakerName: vm.currentSpeakerName,
                             modelName: vm.activeModelLabel,
+                            userName: vm.displayUserName,
                             revision: vm.chatRevision,
                             onRegenerate: { vm.regenerate(messageID: $0) },
                             onSelectVariant: { vm.selectVariant(messageID: $0, dir: $1) }
@@ -358,12 +385,13 @@ struct AetheriumView: View {
                                 }
                             }
                             MultilineInputField(text: $inputText, height: $inputHeight,
+                                                placeholder: "メッセージを入力…",
                                                 onSubmit: { submitInput() },
                                                 onPasteImage: { handlePasteImage() })
                                 .frame(height: inputHeight)
                             HStack(spacing: 8) {
                                 // 🌐 Web検索トグル（コンテキストが空のときだけ切替可）
-                                toggleChip(icon: "globe", label: "検索",
+                                toggleChip(icon: "globe",
                                            isOn: vm.webSearchEnabled, isEnabled: vm.canToggleWebSearch,
                                            help: webSearchHelp) {
                                     vm.webSearchEnabled.toggle()
@@ -371,14 +399,14 @@ struct AetheriumView: View {
                                 }
                                 // 💡 思考モードトグル（Ollamaで対応モデルのときだけ表示・常時切替可）
                                 if vm.aiProvider == .ollama && vm.ollamaThinkingSupported {
-                                    toggleChip(icon: vm.thinkingEnabled ? "lightbulb.fill" : "lightbulb", label: "思考",
+                                    toggleChip(icon: vm.thinkingEnabled ? "lightbulb.fill" : "lightbulb",
                                                isOn: vm.thinkingEnabled, isEnabled: true,
                                                help: vm.thinkingEnabled ? "思考モード: ON" : "思考モード: OFF") {
                                         vm.thinkingEnabled.toggle()
                                     }
                                 }
                                 // 🔊 音声読み上げトグル（常時切替可）
-                                toggleChip(icon: vm.voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill", label: "音声",
+                                toggleChip(icon: vm.voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
                                            isOn: vm.voiceEnabled, isEnabled: true,
                                            help: vm.voiceEnabled ? "音声読み上げ: ON" : "音声読み上げ: OFF") {
                                     vm.voiceEnabled.toggle()

@@ -21,6 +21,8 @@ struct ConversationWebView: NSViewRepresentable {
     let isGenerating: Bool
     let speakerName: String
     let modelName: String
+    /// ユーザー吹き出しのラベル（未設定なら「あなた」）。
+    let userName: String
     // 末尾以外の変更（過去の版切替）で全再描画させるためのトークン。
     let revision: Int
     let onRegenerate: (UUID) -> Void
@@ -55,7 +57,9 @@ struct ConversationWebView: NSViewRepresentable {
 
     /// メッセージ配列を base64 化した JSON にする。
     static func encodeBase64<T: Encodable>(_ value: T) -> String? {
-        guard let data = try? JSONEncoder().encode(value) else { return nil }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970  // JS の new Date(ms) で扱えるよう epoch ミリ秒で渡す
+        guard let data = try? encoder.encode(value) else { return nil }
         return data.base64EncodedString()
     }
 
@@ -73,6 +77,7 @@ struct ConversationWebView: NSViewRepresentable {
         private var lastDark: Bool?
         private var lastSpeaker = "\u{1}"
         private var lastModel = "\u{1}"
+        private var lastUserName = "\u{1}"
         private var lastRevision = -1
         private var lastLastSig = "\u{1}\u{1}"
         private var pending: DispatchWorkItem?
@@ -90,7 +95,7 @@ struct ConversationWebView: NSViewRepresentable {
             parent = newParent
             guard loaded else { return }
             // 件数・テーマ・話者の変化は構造変化 → 全再描画。
-            if parent.messages.count != lastCount || parent.dark != lastDark || parent.speakerName != lastSpeaker || parent.modelName != lastModel || parent.revision != lastRevision {
+            if parent.messages.count != lastCount || parent.dark != lastDark || parent.speakerName != lastSpeaker || parent.modelName != lastModel || parent.userName != lastUserName || parent.revision != lastRevision {
                 fullReload(webView)
                 return
             }
@@ -107,13 +112,15 @@ struct ConversationWebView: NSViewRepresentable {
             lastDark = parent.dark
             lastSpeaker = parent.speakerName
             lastModel = parent.modelName
+            lastUserName = parent.userName
             lastRevision = parent.revision
             lastLastSig = parent.lastSignature()
             pending?.cancel()
             guard let msgsB64 = ConversationWebView.encodeBase64(parent.messages) else { return }
             let speakerB64 = Data(parent.speakerName.utf8).base64EncodedString()
             let modelB64 = Data(parent.modelName.utf8).base64EncodedString()
-            let js = "setMessages(\"\(msgsB64)\", \(parent.dark), \(parent.isGenerating), \"\(speakerB64)\", \"\(modelB64)\")"
+            let userB64 = Data(parent.userName.utf8).base64EncodedString()
+            let js = "setMessages(\"\(msgsB64)\", \(parent.dark), \(parent.isGenerating), \"\(speakerB64)\", \"\(modelB64)\", \"\(userB64)\")"
             webView.evaluateJavaScript(js, completionHandler: nil)
         }
 

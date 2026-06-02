@@ -1,9 +1,9 @@
 import SwiftUI
 import AppKit
 
-/// SwiftUIの .help() は Form 内でツールチップが出ないことがあるため、
+/// SwiftUIの .help() がツールチップを出さないことがあるため、
 /// 下地の NSView に toolTip を直接設定して確実にホバー表示させる。
-private struct Tooltip: NSViewRepresentable {
+struct Tooltip: NSViewRepresentable {
     let text: String
     init(_ text: String) { self.text = text }
     func makeNSView(context: Context) -> NSView {
@@ -65,6 +65,9 @@ struct SettingsView: View {
                     TextField("", text: $vm.searxngURL, prompt: Text("http://localhost:8080"))
                         .textFieldStyle(.roundedBorder)
                 }
+                LabeledContent("Web検索の取得件数") {
+                    Stepper("\(vm.webSearchResultCount) 件", value: $vm.webSearchResultCount, in: 1...10)
+                }
             }
             HStack {
                 Text("URLを変更したら Enter で再取得されます。")
@@ -82,6 +85,14 @@ struct SettingsView: View {
 
     private var instructionsTab: some View {
         Form {
+            Section {
+                TextField("あなたの名前", text: $vm.userName, prompt: Text("未設定（「あなた」と表示）"))
+            } header: {
+                Text("あなたの呼び名")
+            } footer: {
+                Text("設定すると、チャットでの表示名になり、AI もこの名前で呼びかけます。")
+                    .font(.caption).foregroundColor(.secondary)
+            }
             Section {
                 Toggle("指示を有効にする", isOn: $vm.customInstructionsEnabled)
                 VStack(alignment: .leading, spacing: 6) {

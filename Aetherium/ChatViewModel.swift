@@ -6,6 +6,42 @@ import ImageIO
 import UniformTypeIdentifiers
 import AppKit
 
+/// アプリが組み立てるプロンプト・定型文の集約。散らばり防止と保守性のため1か所にまとめる。
+/// appSystem の KaTeX 記法は WebView の数式描画、ファイル記法は index.html の保存処理と
+/// 対になっている「技術契約」なので、編集時は対応機能との整合に注意。
+enum Prompts {
+    /// 常に適用するアプリ固有のシステム指示（KaTeX 表示・ファイル記法）。
+    static let appSystem = """
+    数式は KaTeX で表示されます。次のお作法に従ってください。
+    - ディスプレイ数式は $$ ... $$ で囲む
+    - インライン数式は \\( ... \\) で囲む（$ ... $ は使わない）
+    - 数式をコードブロック(```)で囲まない（そのまま文字列として表示されてしまう）
+
+    ファイル・コード・データを作成・保存するよう求められたら、その内容は必ずコードフェンスで囲み、開始フェンスに「言語:ファイル名」を書くこと（例: ```python:main.py / ```csv:data.csv / ```json:config.json）。ファイル名は内容にふさわしい名前と拡張子にする。この「言語:ファイル名」表記は省略してはならない。
+    """
+
+    /// Web検索ツールを使うときの振る舞い指示。
+    static let webSearch = "Web検索ツールを使用する場合、検索結果のテキストをそのまま出力しないでください。検索結果を参照して内容を理解し、自分の言葉で簡潔に回答してください。"
+
+    /// Web検索ツール（function calling）の説明文。
+    static let webSearchToolDescription = "SearXNGを使って最新のWeb情報を検索します。最新情報や時事問題について質問されたときに使用してください。"
+
+    /// 呼び名が設定されているときに注入する、AI向けの呼びかけ指示。
+    static func userName(_ name: String) -> String {
+        """
+        # ユーザーについて
+        対話相手の名前は「\(name)」です。次の方針で接してください。
+        - 会話の自然な区切りで名前を呼び、親しみのある対話にする
+        - 敬称や呼び方（「さん」付け・呼び捨て・あだ名など）は固定せず、会話の雰囲気やこのあとの指示・ユーザーの希望に合わせて選ぶ
+        """
+    }
+
+    /// セッション開始時の定型あいさつ。名前があれば呼びかける。
+    static func greeting(_ name: String?) -> String {
+        name.map { "\($0)さん、お手伝いしましょうか？" } ?? "お手伝いしましょうか？"
+    }
+}
+
 actor SearchResultsCollector {
     var sources: [SearchSource] = []
     func append(_ source: SearchSource) { sources.append(source) }
@@ -15,8 +51,9 @@ actor SearchResultsCollector {
 struct WebSearchTool: Tool {
     let collector: SearchResultsCollector
     let searxngURL: String
+    let resultLimit: Int
     let name = "webSearch"
-    let description = "SearXNGを使って最新のWeb情報を検索します。最新情報や時事問題について質問されたときに使用してください。"
+    let description = Prompts.webSearchToolDescription
 
     @Generable
     struct Arguments {
@@ -38,7 +75,7 @@ struct WebSearchTool: Tool {
                 return "検索結果を解析できませんでした"
             }
             var summaries: [String] = []
-            for r in results.prefix(5) {
+            for r in results.prefix(resultLimit) {
                 guard let title = r["title"] as? String else { continue }
                 let content = r["content"] as? String ?? ""
                 let resultURL = r["url"] as? String ?? ""
@@ -70,10 +107,14 @@ final class ChatViewModel: ObservableObject {
     @Published var webSearchEnabled: Bool = false { didSet { persist(webSearchEnabled, "webSearchEnabled") } }
     @Published var thinkingEnabled: Bool = false { didSet { persist(thinkingEnabled, "thinkingEnabled") } }
     @Published var searxngURL: String = ChatViewModel.defaultSearxngURL { didSet { persist(searxngURL, "searxngURL") } }
+    /// Web検索（SearXNG）でAIへ渡す結果の最大件数。
+    @Published var webSearchResultCount: Int = 5 { didSet { persist(webSearchResultCount, "webSearchResultCount") } }
     @Published var voicevoxURL: String = ChatViewModel.defaultVoicevoxURL { didSet { persist(voicevoxURL, "voicevoxURL") } }
     @Published var llmServerURL: String = ChatViewModel.defaultLLMServerURL { didSet { persist(llmServerURL, "llmServerURL") } }
     @Published var customInstructions: String = "" { didSet { persist(customInstructions, "customInstructions") } }
     @Published var customInstructionsEnabled: Bool = true { didSet { persist(customInstructionsEnabled, "customInstructionsEnabled") } }
+    /// ユーザーの呼び名。空のときは表示・指示ともに使わず既定（「あなた」）にフォールバックする。
+    @Published var userName: String = "" { didSet { persist(userName, "userName") } }
     @Published var contextUsageRatio: Double = 0.0
     @Published var ollamaContextSize: Int = 4096 { didSet { persist(ollamaContextSize, "ollamaContextSize") } }
     /// Ollamaの生成パラメータ（temperature/seed等）。未指定の項目はリクエストに含めずOllama既定に任せる。
@@ -116,6 +157,26 @@ final class ChatViewModel: ObservableObject {
     private var settingsLoaded = false
 
     var currentSpeakerName: String { displaySpeakers.first(where: { $0.id == selectedSpeakerID })?.name ?? "AI" }
+
+    /// 設定された呼び名（前後空白を除去）。未設定なら nil。
+    var trimmedUserName: String? {
+        let t = userName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+    /// 吹き出しラベル等の表示用呼び名。未設定なら「あなた」。
+    var displayUserName: String { trimmedUserName ?? "あなた" }
+
+    /// セッションを開始する。会話がまだ空なら、AIの定型あいさつを最初に表示する。
+    func startSession() {
+        // Apple Intelligence は最新のカスタム指示を焼き込むためセッションを作り直す
+        // （開始前は会話ゼロなので作り直しても何も失わない）。
+        if aiProvider == .appleIntelligence { setupFoundationSession() }
+        if messages.isEmpty {
+            let greeting = Prompts.greeting(trimmedUserName)
+            messages.append(Message(role: "assistant", content: greeting))
+        }
+        isInSession = true
+    }
 
     var activeModelLabel: String {
         aiProvider == .appleIntelligence ? "Apple Intelligence" : selectedModel
@@ -177,8 +238,10 @@ final class ChatViewModel: ObservableObject {
         if d.object(forKey: "aetherium.webSearchEnabled") != nil { webSearchEnabled = d.bool(forKey: "aetherium.webSearchEnabled") }
         if d.object(forKey: "aetherium.thinkingEnabled") != nil { thinkingEnabled = d.bool(forKey: "aetherium.thinkingEnabled") }
         if let v = d.string(forKey: "aetherium.searxngURL"), !v.isEmpty { searxngURL = v }
+        if d.object(forKey: "aetherium.webSearchResultCount") != nil { webSearchResultCount = d.integer(forKey: "aetherium.webSearchResultCount") }
         if let v = d.string(forKey: "aetherium.voicevoxURL"), !v.isEmpty { voicevoxURL = v }
         if let v = d.string(forKey: "aetherium.llmServerURL"), !v.isEmpty { llmServerURL = v }
+        if let v = d.string(forKey: "aetherium.userName") { userName = v }
         if let v = d.string(forKey: "aetherium.customInstructions") { customInstructions = v }
         if d.object(forKey: "aetherium.customInstructionsEnabled") != nil { customInstructionsEnabled = d.bool(forKey: "aetherium.customInstructionsEnabled") }
         if d.object(forKey: "aetherium.ollamaContextSize") != nil { ollamaContextSize = d.integer(forKey: "aetherium.ollamaContextSize") }
@@ -217,17 +280,10 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Session management
 
-    private let webSearchInstructions = "Web検索ツールを使用する場合、検索結果のテキストをそのまま出力しないでください。検索結果を参照して内容を理解し、自分の言葉で簡潔に回答してください。"
-
-    /// アプリ固有のシステム指示。表示（KaTeX）を壊さないための固定ルールで、常に適用する。
-    static let appSystemInstructions = """
-    数式は KaTeX で表示されます。次のお作法に従ってください。
-    - ディスプレイ数式は $$ ... $$ で囲む
-    - インライン数式は \\( ... \\) で囲む（$ ... $ は使わない）
-    - 数式をコードブロック(```)で囲まない（そのまま文字列として表示されてしまう）
-
-    ファイル・コード・データを作成・保存するよう求められたら、その内容は必ずコードフェンスで囲み、開始フェンスに「言語:ファイル名」を書くこと（例: ```python:main.py / ```csv:data.csv / ```json:config.json）。ファイル名は内容にふさわしい名前と拡張子にする。この「言語:ファイル名」表記は省略してはならない。
-    """
+    /// 呼び名が設定されているときに注入する、AI向けの呼びかけ指示（未設定ならnil）。
+    private var userNameInstruction: String? {
+        trimmedUserName.map { Prompts.userName($0) }
+    }
 
     /// 有効かつ空でないカスタム指示（無効・空ならnil）。注入・トークン見積もりの共通判定に使う。
     private var activeCustomInstruction: String? {
@@ -239,15 +295,16 @@ final class ChatViewModel: ObservableObject {
     /// アプリのシステム指示・ユーザーのカスタム指示・Web検索用指示を結合した、セッションに渡す最終instructions。
     /// アプリのシステム指示が常に含まれるため必ず非nil。
     private var effectiveInstructions: String? {
-        var parts: [String] = [ChatViewModel.appSystemInstructions]
+        var parts: [String] = [Prompts.appSystem]
+        if let nameInstr = userNameInstruction { parts.append(nameInstr) }
         if let instr = activeCustomInstruction { parts.append(instr) }
-        if webSearchEnabled { parts.append(webSearchInstructions) }
+        if webSearchEnabled { parts.append(Prompts.webSearch) }
         return parts.joined(separator: "\n\n")
     }
 
     private func makeSession() -> LanguageModelSession {
         let tools = webSearchEnabled
-            ? [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL)]
+            ? [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL, resultLimit: webSearchResultCount)]
             : []
         switch (tools.isEmpty, effectiveInstructions) {
         case (false, let instr?): return LanguageModelSession(tools: tools, instructions: instr)
@@ -268,7 +325,7 @@ final class ChatViewModel: ObservableObject {
         }
         let trimmed = Transcript(entries: instructions + exchanges.suffix(4))
         return webSearchEnabled
-            ? LanguageModelSession(tools: [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL)], transcript: trimmed)
+            ? LanguageModelSession(tools: [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL, resultLimit: webSearchResultCount)], transcript: trimmed)
             : LanguageModelSession(transcript: trimmed)
     }
 
@@ -304,7 +361,7 @@ final class ChatViewModel: ObservableObject {
             $0 + messages[$1].content.count
         }
         // システム指示・カスタム指示は毎回先頭に注入されトリム対象外なので、固定オーバーヘッドとして見積もりに加算する
-        totalChars += ChatViewModel.appSystemInstructions.count
+        totalChars += Prompts.appSystem.count
         if let instr = activeCustomInstruction { totalChars += instr.count }
         var newStart = ollamaContextStartIndex
         for idx in trimmable {
@@ -641,7 +698,7 @@ final class ChatViewModel: ObservableObject {
         if let last = entries.last, case .prompt = last { entries.removeLast() }
         let trimmed = Transcript(entries: entries)
         return webSearchEnabled
-            ? LanguageModelSession(tools: [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL)], transcript: trimmed)
+            ? LanguageModelSession(tools: [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL, resultLimit: webSearchResultCount)], transcript: trimmed)
             : LanguageModelSession(transcript: trimmed)
     }
 
@@ -795,7 +852,7 @@ final class ChatViewModel: ObservableObject {
             "type": "function",
             "function": [
                 "name": "webSearch",
-                "description": "SearXNGを使って最新のWeb情報を検索します。最新情報や時事問題について質問されたときに使用してください。",
+                "description": Prompts.webSearchToolDescription,
                 "parameters": [
                     "type": "object",
                     "properties": [
@@ -819,7 +876,7 @@ final class ChatViewModel: ObservableObject {
                 return "検索結果を解析できませんでした"
             }
             var summaries: [String] = []
-            for r in results.prefix(5) {
+            for r in results.prefix(self.webSearchResultCount) {
                 guard let title = r["title"] as? String else { continue }
                 let content = r["content"] as? String ?? ""
                 let resultURL = r["url"] as? String ?? ""
@@ -884,7 +941,8 @@ final class ChatViewModel: ObservableObject {
 
             // アプリのシステム指示（常に）＋ユーザーのカスタム指示 を1つのsystemにまとめて履歴の先頭へ差し込む
             // （画面表示用のお知らせsystemメッセージとは別管理）
-            var systemParts = [ChatViewModel.appSystemInstructions]
+            var systemParts = [Prompts.appSystem]
+            if let nameInstr = self.userNameInstruction { systemParts.append(nameInstr) }
             if let instr = self.activeCustomInstruction { systemParts.append(instr) }
             history.insert(["role": "system", "content": systemParts.joined(separator: "\n\n")], at: 0)
 
