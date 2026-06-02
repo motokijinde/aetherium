@@ -407,7 +407,7 @@ final class ChatViewModel: ObservableObject {
         ollamaToolsSupported = false
         ollamaThinkingSupported = false
         ollamaVisionSupported = false
-        guard let url = URL(string: "http://127.0.0.1:11434/api/show") else { return }
+        guard let url = URL(string: "\(ollamaNativeBaseURL)/api/show") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
