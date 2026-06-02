@@ -76,6 +76,15 @@ final class ChatViewModel: ObservableObject {
     @Published var customInstructionsEnabled: Bool = true { didSet { persist(customInstructionsEnabled, "customInstructionsEnabled") } }
     @Published var contextUsageRatio: Double = 0.0
     @Published var ollamaContextSize: Int = 4096 { didSet { persist(ollamaContextSize, "ollamaContextSize") } }
+    /// Ollamaの生成パラメータ（temperature/seed等）。未指定の項目はリクエストに含めずOllama既定に任せる。
+    @Published var ollamaOptions = OllamaOptions() {
+        didSet {
+            guard settingsLoaded else { return }
+            if let data = try? JSONEncoder().encode(ollamaOptions) {
+                UserDefaults.standard.set(data, forKey: "aetherium.ollamaOptions")
+            }
+        }
+    }
     static let ollamaContextSizeOptions = [2048, 4096, 8192, 16384, 32768, 65536]
     // サーバー接続先のデフォルト値（いずれもIPv4ループバック直指定で統一）。
     static let defaultLLMServerURL = "http://127.0.0.1:11434/v1"
@@ -173,6 +182,8 @@ final class ChatViewModel: ObservableObject {
         if let v = d.string(forKey: "aetherium.customInstructions") { customInstructions = v }
         if d.object(forKey: "aetherium.customInstructionsEnabled") != nil { customInstructionsEnabled = d.bool(forKey: "aetherium.customInstructionsEnabled") }
         if d.object(forKey: "aetherium.ollamaContextSize") != nil { ollamaContextSize = d.integer(forKey: "aetherium.ollamaContextSize") }
+        if let data = d.data(forKey: "aetherium.ollamaOptions"),
+           let opts = try? JSONDecoder().decode(OllamaOptions.self, from: data) { ollamaOptions = opts }
     }
 
     // MARK: - Context usage tracking
@@ -889,11 +900,25 @@ final class ChatViewModel: ObservableObject {
                 // ラウンド毎の計測（tokensPerSecond をそのラウンドの実速度で出すため）
                 let roundStartTime = Date()
                 var roundFirstTokenTime: Date? = nil
+                // 指定された生成パラメータだけを options に載せる（未指定はOllama既定に任せる）。
+                var options: [String: Any] = ["num_ctx": self.ollamaContextSize]
+                let o = self.ollamaOptions
+                if let v = o.temperature { options["temperature"] = v }
+                if let v = o.seed { options["seed"] = v }
+                if let v = o.topP { options["top_p"] = v }
+                if let v = o.topK { options["top_k"] = v }
+                if let v = o.repeatPenalty { options["repeat_penalty"] = v }
+                if let v = o.minP { options["min_p"] = v }
+                if let v = o.numPredict { options["num_predict"] = v }
+                if let v = o.stop, !v.isEmpty { options["stop"] = [v] }  // Ollamaのstopは配列で受ける
+                if let v = o.numGpu { options["num_gpu"] = v }
+                if let v = o.numThread { options["num_thread"] = v }
+                if let v = o.numBatch { options["num_batch"] = v }
                 var requestBody: [String: Any] = [
                     "model": self.selectedModel,
                     "messages": history,
                     "stream": true,
-                    "options": ["num_ctx": self.ollamaContextSize]
+                    "options": options
                 ]
                 if useTools {
                     requestBody["tools"] = [self.ollamaWebSearchToolSpec]

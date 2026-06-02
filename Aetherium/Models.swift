@@ -129,6 +129,22 @@ struct Attachment: Codable, Identifiable {
     private enum CodingKeys: String, CodingKey { case id, kind, filename, payload, mime }
 }
 
+/// Ollamaの生成パラメータ。各値は nil = 未指定（＝Ollama側の既定値を使う）。
+/// 指定された項目だけをリクエストの options に渡す。
+struct OllamaOptions: Codable, Equatable {
+    var temperature: Double?
+    var seed: Int?
+    var topP: Double?
+    var topK: Int?
+    var repeatPenalty: Double?
+    var minP: Double?
+    var numPredict: Int?
+    var stop: String?
+    var numGpu: Int?
+    var numThread: Int?
+    var numBatch: Int?
+}
+
 struct VVStyle: Codable, Hashable {
     let id: Int
     let name: String
