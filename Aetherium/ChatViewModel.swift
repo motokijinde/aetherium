@@ -25,8 +25,14 @@ enum Prompts {
     /// Web検索ツールを使うときの振る舞い指示。
     static let webSearch = "When using the web search tool, do not output the raw search result text. Read and understand the results, then answer concisely in your own words."
 
+    /// RAG検索ツールを使うときの振る舞い指示。
+    static let ragSearch = "You have access to a document search tool (ragSearch) over the user's registered local documents (specifications, meeting notes, design docs, etc.). When the user's question may relate to these documents, call ragSearch first and base your answer on the retrieved content. Do not output the raw retrieved text verbatim; read it and answer concisely in your own words."
+
     /// Web検索ツール（function calling）の説明文。
     static let webSearchToolDescription = "Searches the web for up-to-date information using SearXNG. Use it when asked about current events or the latest information."
+
+    /// RAG検索ツール（function calling）の説明文。Ollama・Apple Intelligence 共通で使う。
+    static let ragSearchToolDescription = "登録済みのドキュメント（仕様書・議事録・設計書など）から関連情報を検索する。質問に関連する社内ドキュメントの情報が必要な場合に使用する。"
 
     /// 呼び名が設定されているときに注入する、AI向けの呼びかけ指示。
     static func userName(_ name: String) -> String {
@@ -38,10 +44,6 @@ enum Prompts {
         """
     }
 
-    /// セッション開始時の定型あいさつ。名前があれば呼びかける。
-    static func greeting(_ name: String?) -> String {
-        name.map { "\($0)さん、お手伝いしましょうか？" } ?? "お手伝いしましょうか？"
-    }
 }
 
 actor SearchResultsCollector {
@@ -91,12 +93,40 @@ struct WebSearchTool: Tool {
     }
 }
 
+/// RAG検索ツール（Apple Intelligence 用）。Ollama の executeRAGSearch と同じ検索・整形を行う。
+struct RAGSearchTool: Tool {
+    let client: RAGClient
+    let resultLimit: Int
+    let name = "ragSearch"
+    let description = Prompts.ragSearchToolDescription
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "検索するクエリ文字列")
+        var query: String
+    }
+
+    var parameters: GenerationSchema { Arguments.generationSchema }
+
+    func call(arguments: Arguments) async throws -> String {
+        do {
+            let results = try await client.search(query: arguments.query, limit: resultLimit)
+            guard !results.isEmpty else { return "関連するドキュメントが見つかりませんでした" }
+            return results.map { r in
+                let source = r.tabName.map { "\(r.title) \($0)" } ?? r.title
+                return "【\(source)】\n\(r.chunk)"
+            }.joined(separator: "\n\n---\n\n")
+        } catch {
+            return "RAGサーバーへの接続に失敗しました: \(error.localizedDescription)"
+        }
+    }
+}
+
 @MainActor
 final class ChatViewModel: ObservableObject {
     @Published var messages: [Message] = []
     @Published var selectedModel: String = "" { didSet { persist(selectedModel, "selectedModel") } }
     @Published var models: [String] = []
-    @Published var isInSession = false
     @Published var isGenerating = false
     @Published var isAudioPlaying = false
     @Published var selectedSpeakerID: Int = 3 { didSet { persist(selectedSpeakerID, "selectedSpeakerID") } }
@@ -114,6 +144,38 @@ final class ChatViewModel: ObservableObject {
     @Published var webSearchResultCount: Int = 5 { didSet { persist(webSearchResultCount, "webSearchResultCount") } }
     @Published var voicevoxURL: String = ChatViewModel.defaultVoicevoxURL { didSet { persist(voicevoxURL, "voicevoxURL") } }
     @Published var llmServerURL: String = ChatViewModel.defaultLLMServerURL { didSet { persist(llmServerURL, "llmServerURL") } }
+    // MARK: RAG（ローカルRAG検索）
+    @Published var ragEnabled: Bool = false { didSet { persist(ragEnabled, "ragEnabled") } }
+    @Published var ragServerURL: String = ChatViewModel.defaultRAGServerURL {
+        didSet {
+            persist(ragServerURL, "ragServerURL")
+            ragClient = RAGClient(baseURL: ragServerURL)  // URL変更時に再生成（管理画面と共有）
+        }
+    }
+    /// RAG検索でAIへ渡す結果の最大件数。
+    @Published var ragResultCount: Int = 3 { didSet { persist(ragResultCount, "ragResultCount") } }
+    /// RAGClientのシングルインスタンス（RAGManagerViewとチャットで共有）。
+    /// lazy のため ragServerURL 読み込み後に初めてアクセスされたとき正しいURLで生成される。
+    private(set) lazy var ragClient = RAGClient(baseURL: ragServerURL)
+    // MARK: RAG同期（旧 RAGManagerView の @State から移設）
+    // Sheet を閉じてもチャットを続けながら同期を継続できるよう、状態と Task を ViewModel 側に保持する。
+    @Published var ragDocuments: [RAGDocument] = []           // 一覧（サーバー登録＋ローカルスキャンのマージ結果）
+    @Published var ragLocalTabs: [String: RAGLocalTab] = [:]  // tab_id → ローカルタブ（同期時のテキスト送信に使う）
+    @Published var ragIsConnected = false
+    @Published var ragIsLoading = false
+    @Published var ragTotalDocuments = 0
+    @Published var ragIsSyncing = false
+    @Published var ragSyncProgress: (current: Int, total: Int)? = nil
+    @Published var ragSyncingTabId: String? = nil
+    @Published var ragSyncingLabel = ""
+    @Published var ragSyncResult: SyncResult? = nil
+    private var ragSyncTask: Task<Void, Never>? = nil
+    /// 完了トースト（ragSyncResult）を一定時間後に自動で消すための待ちタスク。
+    private var ragResultClearTask: Task<Void, Never>? = nil
+    /// 監視フォルダ（"rag.watchedFolders" にJSON永続化。キー名は従来方式を維持する）。
+    @Published var ragWatchedFolders: [WatchedFolder] = []
+    /// 最終同期日時（"rag.lastSyncedAt" にepoch永続化。再起動後のインジケータ復元に使う）。
+    @Published var ragLastSyncedAt: Date? = nil
     @Published var customInstructions: String = "" { didSet { persist(customInstructions, "customInstructions") } }
     @Published var customInstructionsEnabled: Bool = true { didSet { persist(customInstructionsEnabled, "customInstructionsEnabled") } }
     /// ユーザーの呼び名。空のときは表示・指示ともに使わず既定（「あなた」）にフォールバックする。
@@ -134,6 +196,7 @@ final class ChatViewModel: ObservableObject {
     static let defaultLLMServerURL = "http://127.0.0.1:11434/v1"
     static let defaultVoicevoxURL = "http://127.0.0.1:50021"
     static let defaultSearxngURL = "http://127.0.0.1:8080"
+    static let defaultRAGServerURL = "http://127.0.0.1:8000"
     @Published var ollamaToolsSupported: Bool = false
     @Published var ollamaThinkingSupported: Bool = false
     @Published var ollamaVisionSupported: Bool = false
@@ -169,34 +232,21 @@ final class ChatViewModel: ObservableObject {
     /// 吹き出しラベル等の表示用呼び名。未設定なら「あなた」。
     var displayUserName: String { trimmedUserName ?? "あなた" }
 
-    /// セッションを開始する。会話がまだ空なら、AIの定型あいさつを最初に表示する。
-    func startSession() {
-        // Apple Intelligence は最新のカスタム指示を焼き込むためセッションを作り直す
-        // （開始前は会話ゼロなので作り直しても何も失わない）。
-        if aiProvider == .appleIntelligence { setupFoundationSession() }
-        if messages.isEmpty {
-            let greeting = Prompts.greeting(trimmedUserName)
-            messages.append(Message(role: "assistant", content: greeting))
-        }
-        isInSession = true
-    }
-
     var activeModelLabel: String {
         aiProvider == .appleIntelligence ? "Apple Intelligence" : selectedModel
-    }
-
-    var canStartSession: Bool {
-        // VOICEVOX は開始条件に含めない（未起動でも開始でき、音声は使うときだけ動く）。
-        if aiProvider == .appleIntelligence {
-            return appleIntelligenceError == nil
-        } else {
-            return !models.isEmpty
-        }
     }
 
     /// Web検索トグルを切り替えられるか。コンテキストが空（開始前 or クリア直後）のときだけ可。
     /// Ollama はツール対応モデルのときのみ。
     var canToggleWebSearch: Bool {
+        guard !contextHasExchange else { return false }
+        return aiProvider == .appleIntelligence ? true : ollamaToolsSupported
+    }
+
+    /// RAGトグルを切り替えられるか。
+    /// webSearchEnabledと同様、コンテキストが空のときのみ切替可。
+    /// Apple Intelligence は常に可、Ollama はtool対応モデル限定。
+    var canToggleRAG: Bool {
         guard !contextHasExchange else { return false }
         return aiProvider == .appleIntelligence ? true : ollamaToolsSupported
     }
@@ -243,6 +293,14 @@ final class ChatViewModel: ObservableObject {
         if d.object(forKey: "aetherium.thinkingEnabled") != nil { thinkingEnabled = d.bool(forKey: "aetherium.thinkingEnabled") }
         if let v = d.string(forKey: "aetherium.searxngURL"), !v.isEmpty { searxngURL = v }
         if d.object(forKey: "aetherium.webSearchResultCount") != nil { webSearchResultCount = d.integer(forKey: "aetherium.webSearchResultCount") }
+        if d.object(forKey: "aetherium.ragEnabled") != nil { ragEnabled = d.bool(forKey: "aetherium.ragEnabled") }
+        if let v = d.string(forKey: "aetherium.ragServerURL"), !v.isEmpty { ragServerURL = v }
+        if d.object(forKey: "aetherium.ragResultCount") != nil { ragResultCount = d.integer(forKey: "aetherium.ragResultCount") }
+        // RAG同期の永続化（キー名は RAGManagerView 時代の "rag.*" を維持する）。
+        if let data = d.data(forKey: "rag.watchedFolders"),
+           let folders = try? JSONDecoder().decode([WatchedFolder].self, from: data) { ragWatchedFolders = folders }
+        let lastSync = d.double(forKey: "rag.lastSyncedAt")
+        if lastSync > 0 { ragLastSyncedAt = Date(timeIntervalSince1970: lastSync) }
         if let v = d.string(forKey: "aetherium.voicevoxURL"), !v.isEmpty { voicevoxURL = v }
         if let v = d.string(forKey: "aetherium.llmServerURL"), !v.isEmpty { llmServerURL = v }
         if let v = d.string(forKey: "aetherium.userName") { userName = v }
@@ -303,13 +361,24 @@ final class ChatViewModel: ObservableObject {
         if let nameInstr = userNameInstruction { parts.append(nameInstr) }
         if let instr = activeCustomInstruction { parts.append(instr) }
         if webSearchEnabled { parts.append(Prompts.webSearch) }
+        if ragEnabled { parts.append(Prompts.ragSearch) }
         return parts.joined(separator: "\n\n")
     }
 
+    /// Apple Intelligence セッションに積むツール群（Web検索・RAG の各トグルに応じて構築）。
+    private var appleSessionTools: [any Tool] {
+        var tools: [any Tool] = []
+        if webSearchEnabled {
+            tools.append(WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL, resultLimit: webSearchResultCount))
+        }
+        if ragEnabled {
+            tools.append(RAGSearchTool(client: ragClient, resultLimit: ragResultCount))
+        }
+        return tools
+    }
+
     private func makeSession() -> LanguageModelSession {
-        let tools = webSearchEnabled
-            ? [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL, resultLimit: webSearchResultCount)]
-            : []
+        let tools = appleSessionTools
         switch (tools.isEmpty, effectiveInstructions) {
         case (false, let instr?): return LanguageModelSession(tools: tools, instructions: instr)
         case (false, nil):        return LanguageModelSession(tools: tools)
@@ -328,9 +397,10 @@ final class ChatViewModel: ObservableObject {
             exchanges.removeLast()
         }
         let trimmed = Transcript(entries: instructions + exchanges.suffix(4))
-        return webSearchEnabled
-            ? LanguageModelSession(tools: [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL, resultLimit: webSearchResultCount)], transcript: trimmed)
-            : LanguageModelSession(transcript: trimmed)
+        let tools = appleSessionTools
+        return tools.isEmpty
+            ? LanguageModelSession(transcript: trimmed)
+            : LanguageModelSession(tools: tools, transcript: trimmed)
     }
 
     func clearContext() {
@@ -701,9 +771,10 @@ final class ChatViewModel: ObservableObject {
         if let last = entries.last, case .response = last { entries.removeLast() }
         if let last = entries.last, case .prompt = last { entries.removeLast() }
         let trimmed = Transcript(entries: entries)
-        return webSearchEnabled
-            ? LanguageModelSession(tools: [WebSearchTool(collector: searchResultsCollector, searxngURL: searxngURL, resultLimit: webSearchResultCount)], transcript: trimmed)
-            : LanguageModelSession(transcript: trimmed)
+        let tools = appleSessionTools
+        return tools.isEmpty
+            ? LanguageModelSession(transcript: trimmed)
+            : LanguageModelSession(tools: tools, transcript: trimmed)
     }
 
     // MARK: - Apple Intelligence
@@ -868,6 +939,36 @@ final class ChatViewModel: ObservableObject {
         ]
     }
 
+    private var ollamaRAGToolSpec: [String: Any] {
+        [
+            "type": "function",
+            "function": [
+                "name": "ragSearch",
+                "description": Prompts.ragSearchToolDescription,
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "query": ["type": "string", "description": "検索するクエリ文字列"]
+                    ],
+                    "required": ["query"]
+                ]
+            ]
+        ]
+    }
+
+    private func executeRAGSearch(query: String) async -> String {
+        do {
+            let results = try await ragClient.search(query: query, limit: ragResultCount)
+            guard !results.isEmpty else { return "関連するドキュメントが見つかりませんでした" }
+            return results.map { r in
+                let source = r.tabName.map { "\(r.title) \($0)" } ?? r.title
+                return "【\(source)】\n\(r.chunk)"
+            }.joined(separator: "\n\n---\n\n")
+        } catch {
+            return "RAGサーバーへの接続に失敗しました: \(error.localizedDescription)"
+        }
+    }
+
     private func executeWebSearch(query: String) async -> String {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         guard let url = URL(string: "\(searxngURL)/search?q=\(encoded)&format=json") else {
@@ -948,9 +1049,13 @@ final class ChatViewModel: ObservableObject {
             var systemParts = [self.responseLanguage.instruction, Prompts.appSystem]
             if let nameInstr = self.userNameInstruction { systemParts.append(nameInstr) }
             if let instr = self.activeCustomInstruction { systemParts.append(instr) }
+            // RAG ON時は、ツールを確実に使わせるための振る舞い指示を足す（tool descriptionの補強）。
+            if self.ragEnabled && self.ollamaToolsSupported { systemParts.append(Prompts.ragSearch) }
             history.insert(["role": "system", "content": systemParts.joined(separator: "\n\n")], at: 0)
 
-            let useTools = self.webSearchEnabled && self.ollamaToolsSupported
+            let useWebSearch = self.webSearchEnabled && self.ollamaToolsSupported
+            let useRAG       = self.ragEnabled       && self.ollamaToolsSupported
+            let useTools     = useWebSearch || useRAG
             var toolRoundCount = 0
             // KVキャッシュヒット時: prompt_tokens = 新規評価分のみ（小さい） → 累積で補う
             // トリム直後:          prompt_tokens = 履歴全体の再評価（大きい・正確） → 実測値で上書き
@@ -983,7 +1088,10 @@ final class ChatViewModel: ObservableObject {
                     "options": options
                 ]
                 if useTools {
-                    requestBody["tools"] = [self.ollamaWebSearchToolSpec]
+                    var toolSpecs: [[String: Any]] = []
+                    if useWebSearch { toolSpecs.append(self.ollamaWebSearchToolSpec) }
+                    if useRAG       { toolSpecs.append(self.ollamaRAGToolSpec) }
+                    requestBody["tools"] = toolSpecs
                 }
                 // 思考モード: 対応モデルのときのみ think を明示送信（未指定だと既定で有効化されるため、OFFも明示する）
                 if self.ollamaThinkingSupported {
@@ -1131,11 +1239,18 @@ final class ChatViewModel: ObservableObject {
                     }
 
                     for tc in accumulatedToolCalls {
-                        guard tc.name == "webSearch", let query = tc.arguments["query"] as? String else {
+                        guard let query = tc.arguments["query"] as? String else {
                             history.append(["role": "tool", "content": "ツール不明", "tool_name": tc.name])
                             continue
                         }
-                        let result = await self.executeWebSearch(query: query)
+                        let result: String
+                        switch tc.name {
+                        case "webSearch": result = await self.executeWebSearch(query: query)
+                        case "ragSearch": result = await self.executeRAGSearch(query: query)
+                        default:
+                            history.append(["role": "tool", "content": "ツール不明", "tool_name": tc.name])
+                            continue
+                        }
                         history.append(["role": "tool", "content": result, "tool_name": tc.name])
                     }
 
@@ -1231,13 +1346,288 @@ final class ChatViewModel: ObservableObject {
         stopGeneration()
         messages = []
         pendingAttachments = []
-        isInSession = false
         contextHasExchange = false
         ollamaContextStartIndex = 0
         ollamaContextUsedTokens = 0
         contextUsageRatio = 0.0
         if aiProvider == .appleIntelligence {
             foundationSession = makeSession()
+        }
+    }
+
+    // MARK: - RAG ドキュメント同期
+    // 旧 RAGManagerView の @State 群とロジックを移設したもの。Sheet の寿命より長生きする同期 Task を
+    // ViewModel 側で保持し、Sheet を閉じてもチャットを続けながら同期を継続できるようにする。
+
+    /// ツールバー同期インジケータの状態（RAG ON 時のみ View で表示する）。
+    enum RAGSyncIndicator {
+        case syncing(current: Int, total: Int)  // 🔄 同期中 3/12
+        case success(total: Int)                // ✅ 12/12
+        case partial(done: Int, total: Int)     // ⚠️ 10/12
+        case allFailed                          // ⚠️ 同期失敗
+        case lastSynced(Date)                   // 🕐 最終同期 6/04 14:30
+    }
+
+    /// 現在の同期状態から導くインジケータ。何も無ければ nil（＝非表示）。
+    /// 同期結果はメモリ上のため再起動で揮発する。その場合は lastSyncedAt から「最終同期」を表示する。
+    var ragSyncIndicator: RAGSyncIndicator? {
+        if ragIsSyncing {
+            let p = ragSyncProgress ?? (0, 0)
+            return .syncing(current: p.current, total: p.total)
+        }
+        if let r = ragSyncResult {
+            let done = r.added + r.updated + r.deleted
+            let total = done + r.errors.count
+            if total > 0 {
+                if r.errors.isEmpty { return .success(total: total) }
+                if done == 0 { return .allFailed }
+                return .partial(done: done, total: total)
+            }
+        }
+        if let d = ragLastSyncedAt { return .lastSynced(d) }
+        return nil
+    }
+
+    private func saveWatchedFolders(_ folders: [WatchedFolder]) {
+        ragWatchedFolders = folders
+        UserDefaults.standard.set((try? JSONEncoder().encode(folders)) ?? Data(), forKey: "rag.watchedFolders")
+    }
+
+    /// 監視フォルダを追加する（フォルダ選択 → security-scoped bookmark 保存 → 再スキャン）。
+    func addWatchedFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        var folders = ragWatchedFolders
+        guard !folders.contains(where: { $0.path == url.path }) else { return }
+        let bookmark = try? url.bookmarkData(options: .withSecurityScope,
+                                             includingResourceValuesForKeys: nil, relativeTo: nil)
+        folders.append(WatchedFolder(path: url.path, bookmark: bookmark))
+        saveWatchedFolders(folders)
+        Task { await refreshRAG() }
+    }
+
+    /// 監視フォルダを外す（パス情報のみ削除。登録済みドキュメントは削除しない）。
+    func removeWatchedFolder(_ id: UUID) {
+        saveWatchedFolders(ragWatchedFolders.filter { $0.id != id })
+        Task { await refreshRAG() }
+    }
+
+    /// サーバー登録情報とローカルスキャンを取得・マージして一覧を更新する。
+    func refreshRAG() async {
+        ragIsLoading = true
+        defer { ragIsLoading = false }
+        let folders = ragWatchedFolders
+
+        // 接続確認
+        var connected = false
+        do { connected = try await ragClient.healthCheck() } catch { connected = false }
+        ragIsConnected = connected
+        guard connected else {
+            ragDocuments = []; ragLocalTabs = [:]; ragTotalDocuments = 0
+            return
+        }
+
+        // サーバー登録情報
+        var server: [RAGDocument] = []
+        do { server = try await ragClient.listDocuments() } catch { server = [] }
+        ragTotalDocuments = server.count
+
+        // ローカルスキャン（main actor外で実行）
+        let local = await Task.detached { RAGScanner.scan(folders: folders) }.value
+
+        let (docs, locMap) = Self.mergeRAG(server: server, local: local)
+        ragDocuments = docs
+        ragLocalTabs = locMap
+    }
+
+    /// サーバー登録情報とローカルスキャン結果をマージし、各タブの status を計算する。
+    static func mergeRAG(server: [RAGDocument], local: [RAGLocalTab]) -> ([RAGDocument], [String: RAGLocalTab]) {
+        let localByTab = Dictionary(local.map { ($0.tabId, $0) }, uniquingKeysWith: { a, _ in a })
+        let serverTabIds = Set(server.flatMap { $0.tabs.map(\.id) })
+
+        // file_path ごとにタブを集約。
+        struct Group { var title: String; var registeredAt: Date; var tabs: [String: RAGDocumentTab]; var order: [String] }
+        var groups: [String: Group] = [:]
+        var fileOrder: [String] = []
+
+        func ensure(_ filePath: String, title: String, registeredAt: Date) {
+            if groups[filePath] == nil {
+                groups[filePath] = Group(title: title, registeredAt: registeredAt, tabs: [:], order: [])
+                fileOrder.append(filePath)
+            }
+        }
+
+        // サーバー登録タブ → synced / modified / missing
+        for doc in server {
+            ensure(doc.filePath, title: doc.title, registeredAt: doc.registeredAt)
+            for tab in doc.tabs {
+                var t = tab
+                if let loc = localByTab[tab.id] {
+                    t.status = (loc.checksum == tab.serverChecksum) ? .synced : .modified
+                } else {
+                    t.status = .missing
+                }
+                if groups[doc.filePath]!.tabs[tab.id] == nil { groups[doc.filePath]!.order.append(tab.id) }
+                groups[doc.filePath]!.tabs[tab.id] = t
+            }
+        }
+
+        // ローカルのみ（サーバー未登録）→ new
+        for loc in local where !serverTabIds.contains(loc.tabId) {
+            ensure(loc.filePath, title: loc.title, registeredAt: Date())
+            if groups[loc.filePath]!.tabs[loc.tabId] == nil { groups[loc.filePath]!.order.append(loc.tabId) }
+            groups[loc.filePath]!.tabs[loc.tabId] = RAGDocumentTab(
+                id: loc.tabId, tabName: loc.tabName, mdPath: loc.mdPath,
+                serverChecksum: "", chunkCount: 0, status: .new
+            )
+        }
+
+        var documents: [RAGDocument] = fileOrder.compactMap { filePath in
+            guard let g = groups[filePath] else { return nil }
+            let tabs = g.order.compactMap { g.tabs[$0] }
+            return RAGDocument(title: g.title, filePath: filePath, registeredAt: g.registeredAt, tabs: tabs)
+        }
+        documents.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        return (documents, localByTab)
+    }
+
+    /// new/modified/missing なタブをサーバーへ反映する。Sheet を閉じてもバックグラウンドで継続する。
+    /// 開いたまま監視フォルダへ追加・変更されたファイルも拾えるよう、対象収集の前に再スキャンする。
+    func startRAGSync() {
+        guard ragIsConnected, !ragIsSyncing else { return }
+        ragResultClearTask?.cancel()  // 前回完了トーストの自動消去待ちを止める
+        ragIsSyncing = true
+        ragSyncResult = nil
+        ragSyncingLabel = ""
+        ragSyncProgress = nil
+
+        // @MainActor 由来の Task なので本体も MainActor 上で動く（プロパティへ直接代入できる）。
+        ragSyncTask = Task {
+            // 開いたまま追加・変更されたファイルを検出するため、対象収集の前に再スキャンする。
+            await self.refreshRAG()
+            if Task.isCancelled {
+                self.ragIsSyncing = false
+                self.ragSyncProgress = nil
+                self.ragSyncTask = nil
+                return
+            }
+
+            // 処理対象（new/modified/missing）を順番に収集。元の status を保持する。
+            struct Job { let tabId: String; let status: RAGDocumentStatus; let label: String }
+            var jobs: [Job] = []
+            var syncedCount = 0
+            for doc in self.ragDocuments {
+                for tab in doc.tabs {
+                    switch tab.status {
+                    case .new, .modified, .missing:
+                        let lbl = tab.tabName.map { "\(doc.title) \($0)" } ?? doc.title
+                        jobs.append(Job(tabId: tab.id, status: tab.status, label: lbl))
+                    case .synced:
+                        syncedCount += 1
+                    default:
+                        break
+                    }
+                }
+            }
+            guard !jobs.isEmpty else {
+                self.ragSyncResult = SyncResult(added: 0, updated: 0, deleted: 0, skipped: syncedCount, errors: [])
+                self.ragIsSyncing = false
+                self.ragSyncTask = nil
+                self.scheduleSyncResultClear()
+                return
+            }
+
+            let folders = self.ragWatchedFolders
+            let localSnapshot = self.ragLocalTabs
+            self.ragSyncProgress = (0, jobs.count)
+            self.markRAGPending(Set(jobs.map(\.tabId)))
+
+            var added = 0, updated = 0, deleted = 0
+            var errors: [SyncError] = []
+
+            for (i, job) in jobs.enumerated() {
+                if Task.isCancelled { break }
+                self.ragSyncingTabId = job.tabId
+                self.ragSyncingLabel = job.label
+                self.ragSyncProgress = (i, jobs.count)
+                do {
+                    switch job.status {
+                    case .missing:
+                        try await self.ragClient.deleteDocuments(tabIds: [job.tabId])
+                        deleted += 1
+                    case .new, .modified:
+                        guard let loc = localSnapshot[job.tabId] else {
+                            errors.append(SyncError(id: job.tabId, title: job.label, reason: "ローカル情報が見つかりません"))
+                            continue
+                        }
+                        // テキスト抽出はフォルダのセキュリティスコープ内で同期的に行う。
+                        let text = RAGScanner.withFolderAccess(folders) {
+                            RAGScanner.extractText(from: URL(fileURLWithPath: loc.mdPath))
+                        }
+                        guard let text, !text.isEmpty else {
+                            errors.append(SyncError(id: job.tabId, title: job.label, reason: "テキストを抽出できませんでした"))
+                            continue
+                        }
+                        _ = try await self.ragClient.registerDocument(
+                            tabId: loc.tabId, title: loc.title, tabName: loc.tabName,
+                            filePath: loc.filePath, mdPath: loc.mdPath, checksum: loc.checksum,
+                            text: text, isUpdate: job.status == .modified
+                        )
+                        if job.status == .new { added += 1 } else { updated += 1 }
+                    default:
+                        break
+                    }
+                } catch {
+                    errors.append(SyncError(id: job.tabId, title: job.label,
+                                            reason: error.localizedDescription))
+                }
+            }
+
+            self.ragSyncResult = SyncResult(added: added, updated: updated, deleted: deleted,
+                                            skipped: syncedCount, errors: errors)
+            let now = Date()
+            self.ragLastSyncedAt = now
+            UserDefaults.standard.set(now.timeIntervalSince1970, forKey: "rag.lastSyncedAt")
+            self.ragSyncingTabId = nil
+            self.ragSyncingLabel = ""
+            self.ragSyncProgress = nil
+            self.ragIsSyncing = false
+            self.ragSyncTask = nil
+            await self.refreshRAG()
+            self.scheduleSyncResultClear()
+        }
+    }
+
+    /// 同期完了トースト（ragSyncResult）を数秒後に自動で消す。
+    /// クリア後は ragSyncIndicator が lastSyncedAt から「🕐 最終同期 日時」へ自然に戻る。
+    private func scheduleSyncResultClear() {
+        ragResultClearTask?.cancel()
+        ragResultClearTask = Task {
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self.ragSyncResult = nil
+        }
+    }
+
+    func cancelRAGSync() {
+        ragSyncTask?.cancel()
+        ragSyncTask = nil
+        ragIsSyncing = false
+        ragSyncingTabId = nil
+        ragSyncingLabel = ""
+        ragSyncProgress = nil
+        Task { await refreshRAG() }
+    }
+
+    /// 指定タブの status を pending にして「待機中」表示にする。
+    private func markRAGPending(_ ids: Set<String>) {
+        for i in ragDocuments.indices {
+            for j in ragDocuments[i].tabs.indices where ids.contains(ragDocuments[i].tabs[j].id) {
+                ragDocuments[i].tabs[j].status = .pending
+            }
         }
     }
 }

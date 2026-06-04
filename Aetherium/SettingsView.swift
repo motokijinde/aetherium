@@ -68,6 +68,13 @@ struct SettingsView: View {
                 LabeledContent("Web検索の取得件数") {
                     Stepper("\(vm.webSearchResultCount) 件", value: $vm.webSearchResultCount, in: 1...10)
                 }
+                LabeledContent("RAG API URL") {
+                    TextField("", text: $vm.ragServerURL, prompt: Text("http://127.0.0.1:8000"))
+                        .textFieldStyle(.roundedBorder)
+                }
+                LabeledContent("RAG検索の取得件数") {
+                    Stepper("\(vm.ragResultCount) 件", value: $vm.ragResultCount, in: 1...10)
+                }
             }
             HStack {
                 Text("URLを変更したら Enter で再取得されます。")
@@ -138,6 +145,25 @@ struct SettingsView: View {
     private var generationTab: some View {
         Form {
             Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    let sizes = ChatViewModel.ollamaContextSizeOptions
+                    Text("Context Size: \(contextSizeLabel(vm.ollamaContextSize))")
+                    Slider(
+                        value: Binding(
+                            get: { Double(sizes.firstIndex(of: vm.ollamaContextSize) ?? 0) },
+                            set: { vm.ollamaContextSize = sizes[Int($0.rounded())] }
+                        ),
+                        in: 0...Double(sizes.count - 1),
+                        step: 1
+                    )
+                }
+            } header: {
+                Text("コンテキスト長")
+            } footer: {
+                Text("AIが一度に保持できる会話量。大きいほど長く覚えられますが、メモリと処理時間が増えます。")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            Section {
                 doubleRow("Temperature", "ばらつきの大きさ。低いほど安定、高いほど多様。\n範囲: 0.0〜2.0 ／ 既定: 0.8",
                           \.temperature, default: 0.8)
                 doubleRow("Top P", "上位の累積確率で候補を絞る。\n範囲: 0.0〜1.0 ／ 既定: 0.9",
@@ -177,6 +203,11 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func contextSizeLabel(_ size: Int) -> String {
+        let k = size / 1024
+        return "\(k)K"
     }
 
     /// 生成パラメータ1行（小数）。チェックOFF=未指定（Ollama既定）、ON=値を編集して送信。

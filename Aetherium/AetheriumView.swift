@@ -5,7 +5,8 @@ import UniformTypeIdentifiers
 /// 入力欄下のアイコンチップ（検索・思考・音声・添付・画像）の共通UI。
 /// ON=青背景、OFF=薄背景、無効=フェードで状態を示す。マウスオーバーで背景を濃くして押せる感を出し、
 /// `.help()` が出ない環境向けに NSView の toolTip（`Tooltip`）で説明をホバー表示する。
-private struct ChipButton: View {
+/// RAG管理ウィンドウの Add ボタンでも同じ見た目・サイズで使うため internal にしている。
+struct ChipButton: View {
     let icon: String
     var isOn: Bool = false
     var isEnabled: Bool = true
@@ -178,6 +179,12 @@ struct AetheriumView: View {
     @State private var inputHeight: CGFloat = 38
     // PDF出力用に live な会話 WebView を保持するブリッジ。
     @State private var exporter = ConversationExporter()
+    // RAGドキュメント管理ウィンドウを開くための環境アクション（📚 Menu と同期インジケータが入口）。
+    @Environment(\.openWindow) private var openWindow
+    // エンプティステートの Provider セグメントの実測幅。モデル行を同じ幅に揃えるのに使う。
+    @State private var providerPickerWidth: CGFloat = 0
+    // ツールバーの同期インジケータ（RAG管理への入口）のホバー状態。
+    @State private var syncIndicatorHovering = false
 
     private func submitInput() {
         let t = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -285,257 +292,51 @@ struct AetheriumView: View {
         return vm.webSearchEnabled ? "Web検索 (SearXNG): ON" : "Web検索 (SearXNG): OFF"
     }
 
+    /// 📚 RAGトグルのツールチップ（無効理由を説明）。
+    private var ragHelp: String {
+        if vm.contextHasExchange { return "会話中は変更できません。コンテキストをクリアすると変更できます" }
+        return vm.ragEnabled ? "RAG検索: ON" : "RAG検索: OFF"
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if !vm.isInSession {
-                    VStack(spacing: 40) {
-                        VStack(spacing: 10) {
-                            Image(systemName: "sparkles").font(.system(size: 50)).foregroundStyle(Color.blue.gradient)
-                            Text("Aetherium").font(.system(size: 40, weight: .black, design: .rounded))
-                        }
-                        VStack(alignment: .leading, spacing: 25) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Label("AI Provider", systemImage: "cpu.fill").font(.subheadline).bold()
-                                Picker("", selection: $vm.aiProvider) {
-                                    ForEach(AIProvider.allCases, id: \.self) { provider in
-                                        Text(provider.rawValue).tag(provider)
-                                    }
-                                }
-                                .pickerStyle(.segmented)
-                                .labelsHidden()
-                                .onChange(of: vm.aiProvider) { _, newValue in
-                                    if newValue == .appleIntelligence {
-                                        vm.setupFoundationSession()
-                                    } else if !vm.selectedModel.isEmpty {
-                                        Task { await vm.fetchModelInfo(for: vm.selectedModel) }
-                                    }
-                                }
-                            }
-                            if vm.aiProvider == .ollama {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Label("Model", systemImage: "cpu").font(.subheadline).bold()
-                                    HStack(spacing: 8) {
-                                        if vm.models.isEmpty {
-                                            Text("LLMを起動してください").font(.caption).foregroundColor(.red)
-                                        } else {
-                                            Picker("", selection: $vm.selectedModel) {
-                                                ForEach(vm.models, id: \.self) { Text($0).tag($0) }
-                                            }
-                                            .pickerStyle(.menu).labelsHidden()
-                                        }
-                                        Button { Task { await vm.fetchModels() } } label: {
-                                            Image(systemName: "arrow.clockwise")
-                                        }
-                                        .buttonStyle(.plain).disabled(vm.isFetching).help("モデルを再取得")
-                                        Spacer()
-                                    }
-                                }
-                                .onChange(of: vm.selectedModel) { _, newModel in
-                                    guard !newModel.isEmpty else { return }
-                                    Task { await vm.fetchModelInfo(for: newModel) }
-                                }
-                                VStack(alignment: .leading, spacing: 8) {
-                                    let sizes = ChatViewModel.ollamaContextSizeOptions
-                                    Label("Context Size: \(contextSizeLabel(vm.ollamaContextSize))", systemImage: "memorychip").font(.subheadline).bold()
-                                    Slider(
-                                        value: Binding(
-                                            get: { Double(sizes.firstIndex(of: vm.ollamaContextSize) ?? 0) },
-                                            set: { vm.ollamaContextSize = sizes[Int($0.rounded())] }
-                                        ),
-                                        in: 0...Double(sizes.count - 1),
-                                        step: 1
-                                    )
-                                }
-                            } else {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Label("Apple Intelligence", systemImage: "apple.intelligence").font(.subheadline).bold()
-                                    if let error = vm.appleIntelligenceError {
-                                        Text(error).font(.caption).foregroundColor(.red).fixedSize(horizontal: false, vertical: true)
-                                    } else {
-                                        Text("オンデバイス AI が利用可能です").font(.caption).foregroundColor(.green)
-                                    }
-                                }
-                            }
-                            // 音声・Web検索・各URLは「設定(⌘,)」と入力欄に移動した。
-                            Text("音声/Web検索はチャットの入力欄、接続先URLや話者は「設定(⌘,)」で変更できます。")
-                                .font(.caption2).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-                        }.padding(30).background(.thinMaterial).cornerRadius(24).frame(width: 380)
-
-                        VStack(spacing: 12) {
-                            Button(action: {
-                                withAnimation(.spring()) { vm.startSession() }
-                            }) {
-                                Text("Start Session").font(.headline).frame(width: 220, height: 40)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                            .clipShape(Capsule())
-                            .disabled(!vm.canStartSession)
-
-                            if vm.aiProvider == .ollama && vm.models.isEmpty {
-                                Button(action: { Task { await vm.fetchAll() } }) {
-                                    Label(vm.isFetching ? "接続中..." : "再接続", systemImage: "arrow.clockwise")
-                                }
-                                .disabled(vm.isFetching)
-                                .font(.subheadline)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .task {
-                        await vm.fetchAll()
-                        // 起動時にApple Intelligenceが復元されていたらセッションを初期化する。
-                        if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
-                    }
-                } else {
-                    VStack(spacing: 0) {
-                        // 会話全体を1個のWebViewで描画し、スクロールはWebView内部に任せる
-                        // （メッセージ毎にWebViewを並べる方式の重さ・スクロール相性問題を回避）。
-                        ConversationWebView(
-                            messages: vm.messages,
-                            dark: colorScheme == .dark,
-                            isGenerating: vm.isGenerating,
-                            speakerName: vm.currentSpeakerName,
-                            modelName: vm.activeModelLabel,
-                            userName: vm.displayUserName,
-                            revision: vm.chatRevision,
-                            exporter: exporter,
-                            onRegenerate: { vm.regenerate(messageID: $0) },
-                            onSelectVariant: { vm.selectVariant(messageID: $0, dir: $1) }
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        VStack(spacing: 8) {
-                            if !vm.pendingAttachments.isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 8) {
-                                        ForEach(vm.pendingAttachments) { att in
-                                            attachmentPreview(att)
-                                        }
-                                    }
-                                    .padding(.horizontal, 2)
-                                }
-                            }
-                            MultilineInputField(text: $inputText, height: $inputHeight,
-                                                placeholder: "メッセージを入力…",
-                                                onSubmit: { submitInput() },
-                                                onPasteImage: { handlePasteImage() })
-                                .frame(height: inputHeight)
-                            HStack(spacing: 8) {
-                                // 🌐 Web検索トグル（コンテキストが空のときだけ切替可）
-                                toggleChip(icon: "globe",
-                                           isOn: vm.webSearchEnabled, isEnabled: vm.canToggleWebSearch,
-                                           help: webSearchHelp) {
-                                    vm.webSearchEnabled.toggle()
-                                    if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
-                                }
-                                // 💡 思考モードトグル（Ollamaで対応モデルのときだけ表示・常時切替可）
-                                if vm.aiProvider == .ollama && vm.ollamaThinkingSupported {
-                                    toggleChip(icon: vm.thinkingEnabled ? "lightbulb.fill" : "lightbulb",
-                                               isOn: vm.thinkingEnabled, isEnabled: true,
-                                               help: vm.thinkingEnabled ? "思考モード: ON" : "思考モード: OFF") {
-                                        vm.thinkingEnabled.toggle()
-                                    }
-                                }
-                                // 🔊 音声読み上げトグル（常時切替可）
-                                toggleChip(icon: vm.voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
-                                           isOn: vm.voiceEnabled, isEnabled: true,
-                                           help: vm.voiceEnabled ? "音声読み上げ: ON" : "音声読み上げ: OFF") {
-                                    vm.voiceEnabled.toggle()
-                                }
-                                // 添付はOllama経路のみ対応（Apple Intelligenceは対象外）。
-                                if vm.aiProvider == .ollama {
-                                    // 📎 ファイル添付（pdf/txt/md・常時／生成中も準備として可）。
-                                    actionChip(icon: "paperclip", help: "ファイルを添付 (pdf/txt/md)") { pickFiles() }
-                                    // 🖼️ 画像添付（Vision対応モデルのときだけ表示／生成中も準備として可）。
-                                    if vm.ollamaVisionSupported {
-                                        actionChip(icon: "photo", help: "画像を添付 (png/jpg)") { pickImage() }
-                                    }
-                                }
-                                Spacer()
-                                if vm.isGenerating || vm.isAudioPlaying {
-                                    Button(action: { vm.stopGeneration() }) {
-                                        Image(systemName: "stop.circle.fill")
-                                            .font(.system(size: 30))
-                                            .foregroundStyle(Color.red.gradient)
-                                    }
-                                    .buttonStyle(.plain)
-                                } else {
-                                    Button(action: { submitInput() }) {
-                                        Image(systemName: "arrow.up.circle.fill")
-                                            .font(.system(size: 30))
-                                            .foregroundStyle(canSubmit ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(Color.gray))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .disabled(!canSubmit)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 14).padding(.vertical, 10)
-                        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color.primary.opacity(0.06)))
-                        .padding(.horizontal, 16).padding(.vertical, 12)
-                        .background(.ultraThinMaterial)
-                    }
-                    .toolbar {
-                        ToolbarItemGroup(placement: .primaryAction) {
-                            HStack(spacing: 8) {
-                                HStack(spacing: 6) {
-                                    ZStack {
-                                        Image(systemName: "waveform").foregroundStyle(Color.secondary).opacity((vm.isGenerating || vm.isAudioPlaying) ? 0 : 1)
-                                        Image(systemName: "rays").rotationEffect(.degrees(rotationAngle)).foregroundStyle(Color.blue.gradient).opacity((vm.isGenerating || vm.isAudioPlaying) ? 1 : 0).onAppear { rotationAngle = 0; withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) { rotationAngle = 360 } }
-                                    }.frame(width: 18)
-                                    Text(vm.isGenerating ? "Generating..." : (vm.isAudioPlaying ? "Playing..." : "Ready")).font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor((vm.isGenerating || vm.isAudioPlaying) ? .primary : .secondary)
-                                }
-                                .padding(.leading, 8).padding(.trailing, vm.isGenerating ? 8 : 4).padding(.vertical, 4)
-                                HStack(spacing: 4) {
-                                    ZStack(alignment: .leading) {
-                                        Capsule()
-                                            .fill(Color.secondary.opacity(0.15))
-                                            .frame(width: 56, height: 4)
-                                        Capsule()
-                                            .fill(contextIndicatorColor(vm.contextUsageRatio).gradient)
-                                            .frame(width: max(0, 56 * vm.contextUsageRatio), height: 4)
-                                            .animation(.easeInOut(duration: 0.4), value: vm.contextUsageRatio)
-                                    }
-                                    Text("\(Int(vm.contextUsageRatio * 100))%")
-                                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                        .foregroundColor(contextIndicatorColor(vm.contextUsageRatio))
-                                        .lineLimit(1)
-                                        .fixedSize()
-                                        .animation(.easeInOut(duration: 0.4), value: vm.contextUsageRatio)
-                                }
-                                .help(vm.aiProvider == .ollama
-                                    ? "コンテキスト使用量: \(vm.ollamaContextUsedTokens) / \(vm.ollamaContextSize) tokens (\(Int(vm.contextUsageRatio * 100))%)"
-                                    : "推定コンテキスト使用量: \(Int(vm.contextUsageRatio * 100))%（約4096トークン想定）")
-                                Divider().frame(height: 16).padding(.horizontal, 2)
-                                Button(action: { vm.clearContext() }) {
-                                    Image(systemName: "arrow.counterclockwise")
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(vm.isGenerating)
-                                .help("コンテキストをクリア（会話履歴はそのまま残ります）")
-                                Divider().frame(height: 16).padding(.horizontal, 2)
-                                Menu {
-                                    Button("Markdown (.md)") { saveMarkdown() }
-                                    Button("PDF (.pdf)") { savePDF() }
-                                } label: {
-                                    Image(systemName: "square.and.arrow.down")
-                                }
-                                .menuStyle(.borderlessButton)
-                                .fixedSize()
-                                .disabled(vm.isGenerating || !vm.messages.contains { $0.role == "user" })
-                                .help("会話ログを保存（Markdown / PDF）")
-                                Divider().frame(height: 16).padding(.horizontal, 2)
-                                Button(action: { withAnimation { inputText = ""; vm.resetSession() } }) { Text("Exit").fontWeight(.medium).foregroundColor(.red) }.buttonStyle(.bordered).controlSize(.small)
-                                Spacer().frame(width: 6)
-                            }
-                        }
-                    }
+                // 会話全体を1個のWebViewで描画し、スクロールはWebView内部に任せる
+                // （メッセージ毎にWebViewを並べる方式の重さ・スクロール相性問題を回避）。
+                ConversationWebView(
+                    messages: vm.messages,
+                    dark: colorScheme == .dark,
+                    isGenerating: vm.isGenerating,
+                    speakerName: vm.currentSpeakerName,
+                    modelName: vm.activeModelLabel,
+                    userName: vm.displayUserName,
+                    revision: vm.chatRevision,
+                    exporter: exporter,
+                    onRegenerate: { vm.regenerate(messageID: $0) },
+                    onSelectVariant: { vm.selectVariant(messageID: $0, dir: $1) }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // 最初の発言前は会話が空なので、エンプティステートを重ねて表示する
+                // （ConversationWebView は背景透過なので overlay で重ねられる）。
+                .overlay {
+                    if vm.messages.isEmpty { emptyState }
+                }
+                inputArea
+            }
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    primaryToolbar
                 }
             }
             .navigationTitle("Aetherium")
-            .navigationSubtitle(vm.isInSession ? "Session with \(vm.currentSpeakerName) (\(vm.activeModelLabel))" : "Settings")
+            .navigationSubtitle(vm.contextHasExchange
+                ? "Session with \(vm.currentSpeakerName) (\(vm.activeModelLabel))"
+                : vm.activeModelLabel)
+            .task {
+                await vm.fetchAll()
+                // 起動時にApple Intelligenceが復元されていたらセッションを初期化する。
+                if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
+            }
         }
         .alert("添付エラー", isPresented: Binding(
             get: { vm.attachmentError != nil },
@@ -548,15 +349,277 @@ struct AetheriumView: View {
         .frame(minWidth: 600, minHeight: 700)
     }
 
+    // MARK: - エンプティステート
+
+    /// 最初の発言前にチャット領域中央へ重ねるロゴ＋一文＋プロバイダ／モデル選択。
+    /// プロバイダ・モデルは開始前に一度選べばよいため、ここ（発言したら消える空状態）に置く。
+    @ViewBuilder
+    private var emptyState: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "sparkles").font(.system(size: 50)).foregroundStyle(Color.blue.gradient)
+            Text("Aetherium").font(.system(size: 40, weight: .black, design: .rounded))
+            Text("メッセージを入力して会話を始めましょう")
+                .font(.subheadline).foregroundColor(.secondary)
+            providerModelSelection
+                .fixedSize(horizontal: true, vertical: false)  // カードを中身（＝セグメント幅）にフィットさせる
+                .padding(20)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+    }
+
+    // MARK: - プロバイダ／モデル選択（エンプティステート内）
+
+    @ViewBuilder
+    private var providerModelSelection: some View {
+        VStack(spacing: 14) {
+            Picker("", selection: $vm.aiProvider) {
+                ForEach(AIProvider.allCases, id: \.self) { provider in
+                    Text(provider.rawValue).tag(provider)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()  // セグメントは伸びないので自然な幅にし、これをカード幅の基準にする
+            .background(GeometryReader { geo in
+                Color.clear
+                    .onAppear { providerPickerWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { _, w in providerPickerWidth = w }
+            })
+            .onChange(of: vm.aiProvider) { _, newValue in
+                if newValue == .appleIntelligence {
+                    vm.setupFoundationSession()
+                } else if !vm.selectedModel.isEmpty {
+                    Task { await vm.fetchModelInfo(for: vm.selectedModel) }
+                }
+            }
+            if vm.aiProvider == .ollama {
+                if vm.models.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("LLMを起動してください").font(.caption).foregroundColor(.red)
+                        Button(action: { Task { await vm.fetchAll() } }) {
+                            Label(vm.isFetching ? "Connecting…" : "Reconnect", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(vm.isFetching).font(.subheadline)
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        Picker("", selection: $vm.selectedModel) {
+                            ForEach(vm.models, id: \.self) { Text($0).tag($0) }
+                        }
+                        .pickerStyle(.menu).labelsHidden()
+                        .frame(maxWidth: .infinity)
+                        .onChange(of: vm.selectedModel) { _, newModel in
+                            guard !newModel.isEmpty else { return }
+                            Task { await vm.fetchModelInfo(for: newModel) }
+                        }
+                        // チャットの入力欄チップと同じ：マウスオーバーで背景が変わり、日本語ヘルプも出る。
+                        ChipButton(icon: "arrow.clockwise", isEnabled: !vm.isFetching,
+                                   help: "モデルを再取得") { Task { await vm.fetchModels() } }
+                    }
+                    // セグメントの実測幅に合わせて、再読み込みボタン込みの行幅をピッタリ揃える。
+                    .frame(width: providerPickerWidth > 0 ? providerPickerWidth : nil)
+                }
+            } else {
+                if let error = vm.appleIntelligenceError {
+                    Text(error).font(.caption).foregroundColor(.red)
+                        .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("オンデバイス AI が利用可能です").font(.caption).foregroundColor(.green)
+                }
+            }
+        }
+    }
+
+    // MARK: - 入力欄
+
+    private var inputArea: some View {
+        VStack(spacing: 8) {
+            if !vm.pendingAttachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(vm.pendingAttachments) { att in
+                            attachmentPreview(att)
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+            }
+            MultilineInputField(text: $inputText, height: $inputHeight,
+                                placeholder: "メッセージを入力…",
+                                onSubmit: { submitInput() },
+                                onPasteImage: { handlePasteImage() })
+                .frame(height: inputHeight)
+            HStack(spacing: 8) {
+                // 🌐 Web検索トグル（コンテキストが空のときだけ切替可）
+                toggleChip(icon: "globe",
+                           isOn: vm.webSearchEnabled, isEnabled: vm.canToggleWebSearch,
+                           help: webSearchHelp) {
+                    vm.webSearchEnabled.toggle()
+                    if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
+                }
+                // 📚 RAGトグル（Web検索と全く同じ：タップでON/OFF）。
+                // Apple Intelligence は常に、Ollama はtool対応モデルのとき表示。
+                // RAG管理画面へはツールバーの同期インジケータから開く。
+                if vm.aiProvider == .appleIntelligence || (vm.aiProvider == .ollama && vm.ollamaToolsSupported) {
+                    toggleChip(icon: "books.vertical",
+                               isOn: vm.ragEnabled, isEnabled: vm.canToggleRAG,
+                               help: ragHelp) {
+                        vm.ragEnabled.toggle()
+                        if vm.aiProvider == .appleIntelligence { vm.setupFoundationSession() }
+                    }
+                }
+                // 💡 思考モードトグル（Ollamaで対応モデルのときだけ表示・常時切替可）
+                if vm.aiProvider == .ollama && vm.ollamaThinkingSupported {
+                    toggleChip(icon: vm.thinkingEnabled ? "lightbulb.fill" : "lightbulb",
+                               isOn: vm.thinkingEnabled, isEnabled: true,
+                               help: vm.thinkingEnabled ? "思考モード: ON" : "思考モード: OFF") {
+                        vm.thinkingEnabled.toggle()
+                    }
+                }
+                // 🔊 音声読み上げトグル（常時切替可）
+                toggleChip(icon: vm.voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                           isOn: vm.voiceEnabled, isEnabled: true,
+                           help: vm.voiceEnabled ? "音声読み上げ: ON" : "音声読み上げ: OFF") {
+                    vm.voiceEnabled.toggle()
+                }
+                // 添付はOllama経路のみ対応（Apple Intelligenceは対象外）。
+                if vm.aiProvider == .ollama {
+                    // 📎 ファイル添付（pdf/txt/md・常時／生成中も準備として可）。
+                    actionChip(icon: "paperclip", help: "ファイルを添付 (pdf/txt/md)") { pickFiles() }
+                    // 🖼️ 画像添付（Vision対応モデルのときだけ表示／生成中も準備として可）。
+                    if vm.ollamaVisionSupported {
+                        actionChip(icon: "photo", help: "画像を添付 (png/jpg)") { pickImage() }
+                    }
+                }
+                Spacer()
+                if vm.isGenerating || vm.isAudioPlaying {
+                    Button(action: { vm.stopGeneration() }) {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundStyle(Color.red.gradient)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: { submitInput() }) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundStyle(canSubmit ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(Color.gray))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSubmit)
+                }
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color.primary.opacity(0.06)))
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+    }
+
+    // MARK: - ツールバー（右）
+
+    @ViewBuilder
+    private var primaryToolbar: some View {
+        HStack(spacing: 8) {
+            // RAG検索のON/OFFに関わらず常に表示（クリックで RAG ドキュメント管理を開く）。
+            // 検索で使わなくても登録はできるし、管理画面を開く入口を常に残しておく。未同期時はデフォルト表示。
+            Button(action: { openWindow(id: "rag-manager") }) {
+                Group {
+                    if let indicator = vm.ragSyncIndicator {
+                        syncIndicatorText(indicator)
+                    } else {
+                        Text("📚 ドキュメント")
+                    }
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.secondary)
+                .fixedSize()
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Capsule().fill(syncIndicatorHovering ? Color.primary.opacity(0.12) : Color.clear))
+            }
+            .buttonStyle(.plain)
+            .onHover { syncIndicatorHovering = $0 }
+            .help("RAGドキュメント管理を開きます")
+            Divider().frame(height: 16).padding(.horizontal, 2)
+            HStack(spacing: 6) {
+                ZStack {
+                    Image(systemName: "waveform").foregroundStyle(Color.secondary).opacity((vm.isGenerating || vm.isAudioPlaying) ? 0 : 1)
+                    Image(systemName: "rays").rotationEffect(.degrees(rotationAngle)).foregroundStyle(Color.blue.gradient).opacity((vm.isGenerating || vm.isAudioPlaying) ? 1 : 0).onAppear { rotationAngle = 0; withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) { rotationAngle = 360 } }
+                }.frame(width: 18)
+                Text(vm.isGenerating ? "Generating..." : (vm.isAudioPlaying ? "Playing..." : "Ready")).font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor((vm.isGenerating || vm.isAudioPlaying) ? .primary : .secondary)
+            }
+            .padding(.trailing, vm.isGenerating ? 8 : 4).padding(.vertical, 4)
+            HStack(spacing: 4) {
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.secondary.opacity(0.15))
+                        .frame(width: 56, height: 4)
+                    Capsule()
+                        .fill(contextIndicatorColor(vm.contextUsageRatio).gradient)
+                        .frame(width: max(0, 56 * vm.contextUsageRatio), height: 4)
+                        .animation(.easeInOut(duration: 0.4), value: vm.contextUsageRatio)
+                }
+                Text("\(Int(vm.contextUsageRatio * 100))%")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundColor(contextIndicatorColor(vm.contextUsageRatio))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .animation(.easeInOut(duration: 0.4), value: vm.contextUsageRatio)
+            }
+            .help(vm.aiProvider == .ollama
+                ? "コンテキスト使用量: \(vm.ollamaContextUsedTokens) / \(vm.ollamaContextSize) tokens (\(Int(vm.contextUsageRatio * 100))%)"
+                : "推定コンテキスト使用量: \(Int(vm.contextUsageRatio * 100))%（約4096トークン想定）")
+            Divider().frame(height: 16).padding(.horizontal, 2)
+            Button(action: { vm.clearContext() }) {
+                Image(systemName: "arrow.counterclockwise")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(vm.isGenerating)
+            .help("コンテキストをクリア（会話履歴はそのまま残ります）")
+            Divider().frame(height: 16).padding(.horizontal, 2)
+            Menu {
+                Button("Markdown (.md)") { saveMarkdown() }
+                Button("PDF (.pdf)") { savePDF() }
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(vm.isGenerating || !vm.messages.contains { $0.role == "user" })
+            .help("会話ログを保存（Markdown / PDF）")
+            Divider().frame(height: 16).padding(.horizontal, 2)
+            // New Chat：会話を全消し＋プロバイダ再選択を解禁（確認ダイアログ無し・即実行）。
+            Button(action: { inputText = ""; vm.resetSession() }) {
+                Label("New Chat", systemImage: "square.and.pencil")
+            }
+            .buttonStyle(.bordered).controlSize(.small)
+            .help("会話を消して新規チャットを始めます")
+        }
+        .padding(.leading, 14).padding(.trailing, 10)  // 左14・右10で統一
+    }
+
+    /// 同期インジケータの表示文（ステータス＝日本語。絵文字で状態を示す）。
+    private func syncIndicatorText(_ indicator: ChatViewModel.RAGSyncIndicator) -> Text {
+        switch indicator {
+        case .syncing(let c, let t): return Text("🔄 同期中 \(c)/\(t)")
+        case .success(let t):        return Text("✅ \(t)/\(t)")
+        case .partial(let done, let t): return Text("⚠️ \(done)/\(t)")
+        case .allFailed:             return Text("⚠️ 同期失敗")
+        case .lastSynced(let d):     return Text("🕐 最終同期 \(syncIndicatorTime(d))")
+        }
+    }
+
+    private func syncIndicatorTime(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "M/dd HH:mm"
+        return f.string(from: d)
+    }
+
     private func contextIndicatorColor(_ ratio: Double) -> Color {
         if ratio < 0.6 { return .blue }
         if ratio < 0.8 { return .orange }
         return .red
-    }
-
-    private func contextSizeLabel(_ size: Int) -> String {
-        let k = size / 1024
-        return "\(k)K"
     }
 
 }
